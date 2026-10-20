@@ -21,9 +21,23 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
 #toolbar button, #toolbar .tool-btn{background:#333;border:1px solid #444;color:#ddd;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap;transition:all .15s}
 #toolbar button:hover, #toolbar .tool-btn:hover{background:#444}
 #toolbar button.active, #toolbar .tool-btn.active{background:#4a90d9;border-color:#4a90d9;color:#fff}
+#toolbar .dropdown{position:relative;display:inline-block}
+#toolbar .dropdown-menu{display:none;position:fixed;min-width:176px;background:#333;border:1px solid #444;border-radius:4px;z-index:5000;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.4)}
+#toolbar .dropdown.open .dropdown-menu{display:block}
+#toolbar .dropdown-item{padding:8px 14px;font-size:12px;color:#ddd;cursor:pointer;white-space:nowrap;border-bottom:1px solid #3a3a3a}
+#toolbar .dropdown-item:last-child{border-bottom:none}
+#toolbar .dropdown-item:hover{background:#4a4a4a}
 #toolbar .sep{width:1px;height:20px;background:#444;margin:0 4px;flex-shrink:0}
 #toolbar .tool-btn svg{width:16px;height:16px;vertical-align:middle}
 #toolbar .zoom-label{font-size:11px;color:#aaa;min-width:40px;text-align:center;font-family:monospace}
+
+#transform-bar{position:absolute;top:10px;left:50%;transform:translateX(-50%);display:none;align-items:center;gap:10px;background:rgba(20,24,30,.94);border:1px solid #4a90d9;border-radius:7px;padding:7px 9px;z-index:250;box-shadow:0 8px 24px rgba(0,0,0,.35);pointer-events:auto;white-space:nowrap}
+#transform-bar.visible{display:flex}
+#transform-title{font-size:12px;font-weight:700;color:#7ab5f5}
+#transform-hint{font-size:11px;color:#bbb;max-width:520px;overflow:hidden;text-overflow:ellipsis}
+#transform-bar button{background:#333;border:1px solid #555;color:#ddd;padding:5px 10px;border-radius:4px;font-size:11px;cursor:pointer}
+#transform-bar button:hover{background:#444}
+#btn-apply-transform{background:#2f6fb0!important;border-color:#4a90d9!important;color:#fff!important}
 
 /* ===== MAIN LAYOUT ===== */
 #main{display:flex;flex:1;overflow:hidden}
@@ -124,7 +138,7 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
     <button id="tool-brush" class="tool-btn active" title="Brush">🖌️ Brush</button>
     <button id="tool-eraser" class="tool-btn" title="Eraser">🧹 Eraser</button>
     <button id="tool-pan" class="tool-btn" title="Pan (Space)">✋ Pan</button>
-    <button id="tool-move" class="tool-btn" title="Move Layer">↔️ Move</button>
+    <button id="tool-move" class="tool-btn" title="Move Object / Selection">↔️ Move</button>
     <button id="tool-smudge" class="tool-btn" title="Smudge Mode (finger blending)">👆 Smudge</button>
     <div class="sep"></div>
     <button id="btn-undo" title="Undo (Ctrl+Z)">↩️ Undo</button>
@@ -139,6 +153,17 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
     <button id="btn-clear" title="Clear All">🗑️ Clear</button>
     <div class="sep"></div>
     <button id="btn-export" title="Export PNG">💾 Save PNG</button>
+    <div class="sep"></div>
+    <div class="dropdown" id="transform-dropdown">
+      <button id="btn-transform" title="Transform">🔧 Transform ▾</button>
+      <div class="dropdown-menu" id="transform-menu">
+        <div class="dropdown-item" data-transform="scale">📏 Scale</div>
+        <div class="dropdown-item" data-transform="rotate">🔄 Rotate</div>
+        <div class="dropdown-item" data-transform="skew">🔀 Skew</div>
+        <div class="dropdown-item" data-transform="perspective">🔷 Perspective</div>
+        <div class="dropdown-item" data-transform="mesh">🕸️ Mesh Distort</div>
+      </div>
+    </div>
   </div>
 
   <div id="main">
@@ -219,6 +244,12 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
         <canvas id="display-canvas"></canvas>
       </div>
       <div id="status-bar">100% | 1200×800</div>
+      <div id="transform-bar">
+        <span id="transform-title">Transform</span>
+        <span id="transform-hint">Drag handles to transform</span>
+        <button id="btn-apply-transform" type="button">Apply</button>
+        <button id="btn-cancel-transform" type="button">Cancel</button>
+      </div>
     </div>
 
     <!-- ===== RIGHT: BRUSHES / REFERENCE / LAYERS ===== -->
@@ -379,6 +410,18 @@ let historyIndex=-1;
 let isDrawing=false, isPanning=false, isMoving=false;
 let smudgeMode=false;
 let spaceDown=false;
+
+// ---- SELECTION STATE ----
+let selection=null; // {x,y,w,h,srcCanvas,srcX,srcY} or null
+let isSelecting=false;
+let isDraggingSelection=false;
+let selStart=null; // {x,y} canvas coords
+let selOffset=null; // {x,y} drag offset within selection
+
+// ---- TRANSFORM / MESH STATE ----
+let transformMode=null; // 'scale','rotate','skew','perspective','mesh' or null
+let transformSession=null;
+let transformDrag=null;
 let lastPoint=null, points=[];
 let smoothPos=null, prevSmoothPos=null, velocity=0, prevWidth=0;
 let isFirstPoint=true;
@@ -547,8 +590,38 @@ function requestRedraw(){
         displayCtx.drawImage(l.canvas,l.offsetX,l.offsetY);
         displayCtx.restore();
     });
+
+    // Floating pixels being moved with the Move tool
+    if(selection&&selection.floating&&selection.srcCanvas){
+        displayCtx.save();
+        displayCtx.imageSmoothingEnabled=true;
+        displayCtx.drawImage(selection.srcCanvas,selection.x,selection.y);
+        displayCtx.restore();
+    }
+
+    // Draw selection marching ants
+    if(selection){
+        const s=selection;
+        displayCtx.save();
+        displayCtx.strokeStyle='#fff';
+        displayCtx.lineWidth=1/zoom;
+        displayCtx.setLineDash([4/zoom,4/zoom]);
+        displayCtx.strokeRect(s.x,s.y,s.w,s.h);
+        displayCtx.strokeStyle='#000';
+        displayCtx.lineDashOffset=4/zoom;
+        displayCtx.strokeRect(s.x,s.y,s.w,s.h);
+        displayCtx.restore();
+    }
+
+    // Live transform preview and controls
+    if(transformSession){
+        drawTransformPreview(displayCtx,transformSession);
+        drawTransformOverlay(displayCtx,transformSession);
+    }
+
     container.style.transform=`translate(${panX}px,${panY}px) scale(${zoom})`;
-    statusBar.textContent=`${Math.round(zoom*100)}% | ${W}×${H}`;
+    const modeText=transformSession?` | ${transformSession.mode.toUpperCase()}`:'';
+    statusBar.textContent=`${Math.round(zoom*100)}% | ${W}×${H}${modeText}`;
 }
 
 function updateDisplay(){requestRedraw();}
@@ -560,14 +633,27 @@ function wireEvents(){
   wrap.style.touchAction='none';
 
   wrap.addEventListener('pointerdown',e=>{
+    if(e.target.closest('#transform-bar'))return;
     e.preventDefault();
-    (e.target).setPointerCapture?.(e.pointerId);
+    try{wrap.setPointerCapture(e.pointerId);}catch(_){ }
     const p=getPoint(e);
 
     if(spaceDown||activeTool==='pan'){isPanning=true;lastPoint={x:e.clientX,y:e.clientY};return;}
-    if(activeTool==='move'){isMoving=true;lastPoint={x:e.clientX,y:e.clientY};return;}
-    const layer=getActiveLayer();if(!layer||layer.locked)return;
 
+    // An active transform owns the canvas until it is applied or cancelled.
+    if(transformSession){
+      startTransformDrag(p,e);
+      requestRedraw();
+      return;
+    }
+
+    if(activeTool==='move'){
+      startMoveInteraction(p);
+      return;
+    }
+
+    const layer=getActiveLayer();if(!layer||layer.locked)return;
+    selection=null;
     isDrawing=true;points=[p];
     startStroke(p);
     const brush=getBrushDef();
@@ -581,14 +667,30 @@ function wireEvents(){
     const p=getPoint(e);
 
     if(isPanning){panX+=e.clientX-lastPoint.x;panY+=e.clientY-lastPoint.y;lastPoint={x:e.clientX,y:e.clientY};requestRedraw();return;}
-    if(isMoving){
-      const layer=getActiveLayer();
-      if(layer){layer.offsetX+=(e.clientX-lastPoint.x)/zoom;layer.offsetY+=(e.clientY-lastPoint.y)/zoom;}
-      lastPoint={x:e.clientX,y:e.clientY};
+
+    if(transformDrag){
+      updateTransformDrag(p,e);
+      requestRedraw();
+      return;
+    }
+
+    // Selection rectangle creation
+    if(isSelecting&&selStart){
+      const x=Math.min(selStart.x,p.x),y=Math.min(selStart.y,p.y);
+      const w=Math.abs(p.x-selStart.x),h=Math.abs(p.y-selStart.y);
+      selection={x,y,w,h,srcCanvas:null,srcX:0,srcY:0,layerId:activeLayerId,floating:false};
       requestRedraw();return;
     }
-    if(!isDrawing)return;
 
+    // Floating selection / object drag
+    if(isDraggingSelection&&selection){
+      selection.x=p.x-(selOffset?selOffset.x:0);
+      selection.y=p.y-(selOffset?selOffset.y:0);
+      selection.moved=true;
+      requestRedraw();return;
+    }
+
+    if(!isDrawing)return;
     const brush=getBrushDef();
     strokeTo(p,brush.id,e.pressure||1);
     points.push(p);
@@ -597,7 +699,17 @@ function wireEvents(){
 
   const endStroke=()=>{
     if(isPanning){isPanning=false;lastPoint=null;requestRedraw();return;}
-    if(isMoving){isMoving=false;lastPoint=null;requestRedraw();return;}
+    if(transformDrag){transformDrag=null;requestRedraw();return;}
+    if(isSelecting){
+      isSelecting=false;
+      if(!selection||selection.w<=2||selection.h<=2)selection=null;
+      selStart=null;
+      requestRedraw();return;
+    }
+    if(isDraggingSelection){
+      commitMoveSelection();
+      requestRedraw();return;
+    }
     if(isDrawing){isDrawing=false;finishStroke();lastPoint=null;requestRedraw();}
   };
   wrap.addEventListener('pointerup',endStroke);
@@ -605,13 +717,18 @@ function wireEvents(){
   wrap.addEventListener('pointerleave',endStroke);
 
   window.addEventListener('keydown',e=>{
+    if(e.key==='Enter'&&transformSession){e.preventDefault();applyTransformSession();return;}
+    if(e.key==='Escape'){
+      if(transformSession){e.preventDefault();cancelTransform();return;}
+      if(selection){e.preventDefault();selection.floating?cancelMoveSelection():(selection=null,requestRedraw());return;}
+    }
     if(e.code==='Space'){e.preventDefault();spaceDown=true;wrap.style.cursor='grab';}
-    if((e.ctrlKey||e.metaKey)&&e.key==='z'&&!e.shiftKey){e.preventDefault();undo();}
-    if((e.ctrlKey||e.metaKey)&&(e.key==='y'||(e.shiftKey&&e.key==='z'))){e.preventDefault();redo();}
+    if((e.ctrlKey||e.metaKey)&&e.key==='z'&&!e.shiftKey){e.preventDefault();if(!transformSession&&!(selection&&selection.floating))undo();}
+    if((e.ctrlKey||e.metaKey)&&(e.key==='y'||(e.shiftKey&&e.key==='z'))){e.preventDefault();if(!transformSession&&!(selection&&selection.floating))redo();}
     if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();exportPNG();}
   });
   window.addEventListener('keyup',e=>{
-    if(e.code==='Space'){spaceDown=false;wrap.style.cursor='crosshair';}
+    if(e.code==='Space'){spaceDown=false;wrap.style.cursor=activeTool==='move'?'move':'crosshair';}
   });
 }
 
@@ -622,6 +739,160 @@ function getPoint(e){
     y:(e.clientY-r.top-panY)/zoom,
     pressure:e.pressure||1
   };
+}
+
+// ============================================================
+// MOVE TOOL — free object / selection movement on one layer
+// ============================================================
+function startMoveInteraction(p){
+  const layer=getActiveLayer();
+  if(!layer||layer.locked)return;
+  if(selection&&selection.layerId!==activeLayerId)selection=null;
+
+  // Drag an existing rectangular selection.
+  if(selection&&pointInRect(p,selection)){
+    if(!selection.srcCanvas&&!captureSelectionPixels(layer)){
+      selection=null;
+      requestRedraw();
+      return;
+    }
+    selection.floating=true;
+    selection.originalX=selection.x;
+    selection.originalY=selection.y;
+    selection.moved=false;
+    selOffset={x:p.x-selection.x,y:p.y-selection.y};
+    isDraggingSelection=true;
+    requestRedraw();
+    return;
+  }
+
+  // Click directly on painted content to pick up that connected object.
+  if(pickObjectAtPoint(layer,p)){
+    requestRedraw();
+    return;
+  }
+
+  // Otherwise draw a rectangular selection for a later move.
+  selection=null;
+  isSelecting=true;
+  selStart={x:p.x,y:p.y};
+}
+
+function pointInRect(p,r){return p.x>=r.x&&p.x<=r.x+r.w&&p.y>=r.y&&p.y<=r.y+r.h;}
+
+function captureSelectionPixels(layer){
+  const localX=selection.x-layer.offsetX;
+  const localY=selection.y-layer.offsetY;
+  const w=Math.max(1,Math.ceil(selection.w));
+  const h=Math.max(1,Math.ceil(selection.h));
+  const right=Math.max(0,Math.min(W,localX+w));
+  const bottom=Math.max(0,Math.min(H,localY+h));
+  const left=Math.max(0,Math.min(W,localX));
+  const top=Math.max(0,Math.min(H,localY));
+  if(right-left<=0||bottom-top<=0)return false;
+
+  const c=document.createElement('canvas');
+  c.width=w;c.height=h;
+  c.getContext('2d').drawImage(layer.canvas,-localX,-localY);
+  layer.ctx.clearRect(localX,localY,w,h);
+  selection.srcCanvas=c;
+  selection.srcX=localX;
+  selection.srcY=localY;
+  selection.layerId=layer.id;
+  return true;
+}
+
+function pickObjectAtPoint(layer,p){
+  const px=Math.floor(p.x-layer.offsetX);
+  const py=Math.floor(p.y-layer.offsetY);
+  if(px<0||py<0||px>=W||py>=H)return false;
+
+  const image=layer.ctx.getImageData(0,0,W,H);
+  const data=image.data;
+  const start=(py*W+px)*4;
+  if(data[start+3]<=10)return false;
+
+  const visited=new Uint8Array(W*H);
+  const stack=[py*W+px];
+  const selected=[];
+  let minX=px,minY=py,maxX=px,maxY=py;
+  visited[py*W+px]=1;
+
+  while(stack.length){
+    const idx=stack.pop();
+    const x=idx%W,y=Math.floor(idx/W),a=(idx*4)+3;
+    if(data[a]<=10)continue;
+    selected.push(idx);
+    if(x<minX)minX=x;if(x>maxX)maxX=x;
+    if(y<minY)minY=y;if(y>maxY)maxY=y;
+    if(x>0&&!visited[idx-1]){visited[idx-1]=1;stack.push(idx-1);}
+    if(x<W-1&&!visited[idx+1]){visited[idx+1]=1;stack.push(idx+1);}
+    if(y>0&&!visited[idx-W]){visited[idx-W]=1;stack.push(idx-W);}
+    if(y<H-1&&!visited[idx+W]){visited[idx+W]=1;stack.push(idx+W);}
+  }
+  if(!selected.length)return false;
+
+  const bw=maxX-minX+1,bh=maxY-minY+1;
+  const c=document.createElement('canvas');
+  c.width=bw;c.height=bh;
+  const cctx=c.getContext('2d');
+  const out=cctx.createImageData(bw,bh);
+
+  selected.forEach(idx=>{
+    const x=idx%W,y=Math.floor(idx/W);
+    const si=idx*4,di=((y-minY)*bw+(x-minX))*4;
+    out.data[di]=data[si];
+    out.data[di+1]=data[si+1];
+    out.data[di+2]=data[si+2];
+    out.data[di+3]=data[si+3];
+    data[si+3]=0;
+  });
+  cctx.putImageData(out,0,0);
+  layer.ctx.putImageData(image,0,0);
+
+  selection={
+    x:minX+layer.offsetX,
+    y:minY+layer.offsetY,
+    w:bw,
+    h:bh,
+    srcCanvas:c,
+    srcX:minX,
+    srcY:minY,
+    layerId:layer.id,
+    floating:true,
+    originalX:minX+layer.offsetX,
+    originalY:minY+layer.offsetY,
+    moved:false
+  };
+  selOffset={x:p.x-selection.x,y:p.y-selection.y};
+  isDraggingSelection=true;
+  return true;
+}
+
+function commitMoveSelection(){
+  isDraggingSelection=false;
+  if(!selection){selOffset=null;return;}
+  const layer=layers.find(l=>l.id===selection.layerId)||getActiveLayer();
+  if(layer&&selection.srcCanvas){
+    const x=(selection.moved?selection.x:selection.originalX)-layer.offsetX;
+    const y=(selection.moved?selection.y:selection.originalY)-layer.offsetY;
+    layer.ctx.drawImage(selection.srcCanvas,x,y);
+    if(selection.moved)saveHistory();
+  }
+  selection=null;
+  selOffset=null;
+  renderLayers();
+}
+
+function cancelMoveSelection(){
+  if(selection&&selection.floating&&selection.srcCanvas){
+    const layer=layers.find(l=>l.id===selection.layerId)||getActiveLayer();
+    if(layer)layer.ctx.drawImage(selection.srcCanvas,selection.originalX-layer.offsetX,selection.originalY-layer.offsetY);
+  }
+  selection=null;
+  isDraggingSelection=false;
+  selOffset=null;
+  requestRedraw();
 }
 
 // ============================================================
@@ -996,43 +1267,75 @@ function boxBlur(imageData,radius){const w=imageData.width,h=imageData.height,da
 // UI WIRING
 // ============================================================
 function wireToolbar(){
+  const leaveTransientMode=()=>{
+    if(transformSession)cancelTransform();
+    if(selection&&!selection.floating){selection=null;requestRedraw();}
+  };
   document.getElementById('tool-brush').onclick=()=>{
+    leaveTransientMode();
     activeTool='brush';
+    wrap.style.cursor='crosshair';
     // Restore previous brush (not eraser)
     if(lastBrushId==='eraser'){lastBrushId='pen';lastBrushCat='basic';}
     selectBrush(lastBrushId,lastBrushCat);
     updateToolButtons();
   };
   document.getElementById('tool-eraser').onclick=()=>{
+    leaveTransientMode();
     activeTool='eraser';
+    wrap.style.cursor='crosshair';
     // Save current brush before switching to eraser
     if(activeBrushId!=='eraser'){lastBrushId=activeBrushId;lastBrushCat=activeBrushCat;}
     selectBrush('eraser','basic');
     updateToolButtons();
   };
-  document.getElementById('tool-pan').onclick=()=>{activeTool='pan';updateToolButtons();};
-  document.getElementById('tool-move').onclick=()=>{activeTool='move';updateToolButtons();};
+  document.getElementById('tool-pan').onclick=()=>{leaveTransientMode();activeTool='pan';wrap.style.cursor='grab';updateToolButtons();};
+  document.getElementById('tool-move').onclick=()=>{leaveTransientMode();activeTool='move';wrap.style.cursor='move';updateToolButtons();};
   document.getElementById('tool-smudge').onclick=()=>{
     smudgeMode=!smudgeMode;
     document.getElementById('tool-smudge').classList.toggle('active',smudgeMode);
     document.getElementById('tool-smudge').textContent=smudgeMode?'👆 Smudge ON':'👆 Smudge';
   };
-  document.getElementById('btn-undo').onclick=undo;
-  document.getElementById('btn-redo').onclick=redo;
+  document.getElementById('btn-undo').onclick=()=>{if(!transformSession&&!(selection&&selection.floating))undo();};
+  document.getElementById('btn-redo').onclick=()=>{if(!transformSession&&!(selection&&selection.floating))redo();};
   document.getElementById('btn-zoom-out').onclick=()=>{zoom=Math.max(0.1,zoom*0.9);updateDisplay();};
   document.getElementById('btn-zoom-in').onclick=()=>{zoom=Math.min(5,zoom*1.1);updateDisplay();};
   document.getElementById('btn-reset-view').onclick=()=>{zoom=1;panX=0;panY=0;updateDisplay();};
   document.getElementById('btn-canvas-size').onclick=()=>{
+    if(transformSession)cancelTransform();
     document.getElementById('new-width').value=W;
     document.getElementById('new-height').value=H;
     document.getElementById('new-bg').value=BG;
     document.getElementById('new-bg-text').value=BG;
     document.getElementById('canvas-dialog').style.display='flex';
   };
-  document.getElementById('btn-clear').onclick=()=>{if(confirm('Clear all layers?')){layers.forEach(l=>{l.ctx.clearRect(0,0,W,H);});updateDisplay();saveHistory();}};
+  document.getElementById('btn-clear').onclick=()=>{if(confirm('Clear all layers?')){if(transformSession)transformSession=null;selection=null;hideTransformBar();layers.forEach(l=>{l.ctx.clearRect(0,0,W,H);l.offsetX=0;l.offsetY=0;});updateDisplay();renderLayers();saveHistory();}};
   document.getElementById('btn-export').onclick=exportPNG;
-  document.getElementById('btn-add-layer').onclick=()=>{addLayer('Layer '+(layers.length+1));};
-  document.getElementById('btn-del-layer').onclick=()=>{deleteLayer(activeLayerId);};
+  document.getElementById('btn-add-layer').onclick=()=>{leaveTransientMode();addLayer('Layer '+(layers.length+1));};
+  document.getElementById('btn-del-layer').onclick=()=>{leaveTransientMode();deleteLayer(activeLayerId);};
+
+  // Transform menu: fixed positioning avoids clipping by the scrollable toolbar.
+  const dropdown=document.getElementById('transform-dropdown');
+  const transformBtn=document.getElementById('btn-transform');
+  const menu=document.getElementById('transform-menu');
+  transformBtn.addEventListener('click',e=>{
+    e.stopPropagation();
+    const r=transformBtn.getBoundingClientRect();
+    menu.style.left=Math.max(4,r.left)+'px';
+    menu.style.top=(r.bottom+4)+'px';
+    dropdown.classList.toggle('open');
+  });
+  menu.querySelectorAll('.dropdown-item').forEach(item=>{
+    item.addEventListener('click',e=>{
+      e.stopPropagation();
+      dropdown.classList.remove('open');
+      startTransform(item.dataset.transform);
+    });
+  });
+  document.addEventListener('click',e=>{if(!dropdown.contains(e.target))dropdown.classList.remove('open');});
+  document.getElementById('transform-bar').addEventListener('pointerdown',e=>e.stopPropagation());
+  document.getElementById('btn-apply-transform').onclick=applyTransformSession;
+  document.getElementById('btn-cancel-transform').onclick=cancelTransform;
 }
 
 function updateToolButtons(){
@@ -1040,6 +1343,7 @@ function updateToolButtons(){
   document.getElementById('tool-eraser').classList.toggle('active',activeTool==='eraser');
   document.getElementById('tool-pan').classList.toggle('active',activeTool==='pan');
   document.getElementById('tool-move').classList.toggle('active',activeTool==='move');
+  document.getElementById('btn-transform').classList.toggle('active',!!transformSession);
 }
 
 function wireProperties(){
@@ -1270,6 +1574,432 @@ function applyCanvasSize(){
 }
 
 // ============================================================
+// INTERACTIVE TRANSFORM — Scale / Rotate / Skew / Perspective / Mesh
+// ============================================================
+const TRANSFORM_HINTS={
+  scale:'Drag corner or edge handles to scale. Hold Shift for uniform scaling. Drag inside to reposition.',
+  rotate:'Drag the circular handle to rotate around the pivot. Drag inside to reposition.',
+  skew:'Drag edge handles sideways to skew. Drag inside to reposition.',
+  perspective:'Drag any corner independently for perspective. Drag inside to reposition.',
+  mesh:'Drag any blue mesh node to distort the artwork. Drag inside the mesh to reposition.'
+};
+
+function startTransform(mode){
+  if(transformSession)cancelTransform();
+  if(selection&&selection.floating)commitMoveSelection();
+  selection=null;
+
+  const layer=getActiveLayer();
+  if(!layer||layer.locked){alert('Select an unlocked layer first.');return;}
+  const bbox=getLayerBBox(layer);
+  if(!bbox){alert('The active layer has no visible pixels to transform.');return;}
+
+  const srcFull=document.createElement('canvas');
+  srcFull.width=W;srcFull.height=H;
+  srcFull.getContext('2d').drawImage(layer.canvas,0,0);
+
+  const srcCrop=document.createElement('canvas');
+  srcCrop.width=bbox.w;srcCrop.height=bbox.h;
+  srcCrop.getContext('2d').drawImage(layer.canvas,bbox.x,bbox.y,bbox.w,bbox.h,0,0,bbox.w,bbox.h);
+
+  const x=bbox.x+layer.offsetX,y=bbox.y+layer.offsetY;
+  const corners=[
+    {x:x,y:y},
+    {x:x+bbox.w,y:y},
+    {x:x+bbox.w,y:y+bbox.h},
+    {x:x,y:y+bbox.h}
+  ];
+  const mesh=[];
+  for(let gy=0;gy<4;gy++){
+    mesh[gy]=[];
+    for(let gx=0;gx<4;gx++)mesh[gy][gx]={x:x+bbox.w*(gx/3),y:y+bbox.h*(gy/3)};
+  }
+
+  transformMode=mode;
+  transformSession={
+    mode,
+    layerId:layer.id,
+    previousTool:activeTool==='transform'?'brush':activeTool,
+    srcFull,
+    srcCrop,
+    bbox,
+    corners,
+    mesh,
+    center:getPointsCenter(corners)
+  };
+
+  // Remove the original pixels while the live preview owns them.
+  layer.ctx.clearRect(0,0,W,H);
+  activeTool='transform';
+  wrap.style.cursor='default';
+  showTransformBar(mode);
+  updateToolButtons();
+  requestRedraw();
+}
+
+function getLayerBBox(layer){
+  const id=layer.ctx.getImageData(0,0,layer.canvas.width,layer.canvas.height);
+  const d=id.data;
+  let minX=W,minY=H,maxX=-1,maxY=-1;
+  for(let y=0;y<layer.canvas.height;y++){
+    const row=y*layer.canvas.width;
+    for(let x=0;x<layer.canvas.width;x++){
+      if(d[(row+x)*4+3]>10){
+        if(x<minX)minX=x;if(x>maxX)maxX=x;
+        if(y<minY)minY=y;if(y>maxY)maxY=y;
+      }
+    }
+  }
+  if(maxX<0)return null;
+  return{x:minX,y:minY,w:maxX-minX+1,h:maxY-minY+1};
+}
+
+function showTransformBar(mode){
+  const bar=document.getElementById('transform-bar');
+  document.getElementById('transform-title').textContent=mode.charAt(0).toUpperCase()+mode.slice(1);
+  document.getElementById('transform-hint').textContent=(TRANSFORM_HINTS[mode]||'Drag the handles to transform.')+' Enter = Apply, Esc = Cancel.';
+  bar.classList.add('visible');
+}
+
+function hideTransformBar(){document.getElementById('transform-bar').classList.remove('visible');}
+
+function startTransformDrag(p,e){
+  const s=transformSession;
+  if(!s)return false;
+
+  if(s.mode==='mesh'){
+    for(let gy=0;gy<4;gy++)for(let gx=0;gx<4;gx++){
+      if(Math.hypot(s.mesh[gy][gx].x-p.x,s.mesh[gy][gx].y-p.y)<=12/zoom){
+        transformDrag={type:'mesh',gx,gy};
+        return true;
+      }
+    }
+  }else{
+    const handle=getTransformHandleAt(s,p);
+    if(handle){
+      const center=getPointsCenter(s.corners);
+      transformDrag={
+        type:handle.id==='rotate'?'rotate':s.mode,
+        handle:handle.id,
+        startPoint:p,
+        startCorners:clonePoints(s.corners),
+        startCenter:center,
+        startAngle:Math.atan2(p.y-center.y,p.x-center.x)
+      };
+      return true;
+    }
+  }
+
+  if(pointInPolygon(p,s.corners)){
+    transformDrag={type:'body',startPoint:p,startCorners:clonePoints(s.corners),startMesh:cloneMesh(s.mesh)};
+    return true;
+  }
+  return false;
+}
+
+function updateTransformDrag(p,e){
+  const s=transformSession,d=transformDrag;
+  if(!s||!d)return;
+
+  if(d.type==='mesh'){
+    s.mesh[d.gy][d.gx]={x:p.x,y:p.y};
+    return;
+  }
+
+  if(d.type==='perspective'){
+    const idx={nw:0,ne:1,se:2,sw:3}[d.handle];
+    if(idx!==undefined)s.corners[idx]={x:p.x,y:p.y};
+    return;
+  }
+
+  if(d.type==='body'){
+    const dx=p.x-d.startPoint.x,dy=p.y-d.startPoint.y;
+    s.corners=d.startCorners.map(pt=>({x:pt.x+dx,y:pt.y+dy}));
+    if(s.mode==='mesh')s.mesh=d.startMesh.map(row=>row.map(pt=>({x:pt.x+dx,y:pt.y+dy})));
+    s.center=getPointsCenter(s.corners);
+    return;
+  }
+
+  if(d.type==='rotate'){
+    const angle=Math.atan2(p.y-d.startCenter.y,p.x-d.startCenter.x)-d.startAngle;
+    s.corners=d.startCorners.map(pt=>rotatePoint(pt,d.startCenter,angle));
+    s.center=getPointsCenter(s.corners);
+    return;
+  }
+
+  if(d.type==='scale'){
+    const u={x:((d.startCorners[1].x+d.startCorners[2].x)/2)-d.startCenter.x,y:((d.startCorners[1].y+d.startCorners[2].y)/2)-d.startCenter.y};
+    const v={x:((d.startCorners[2].x+d.startCorners[3].x)/2)-d.startCenter.x,y:((d.startCorners[2].y+d.startCorners[3].y)/2)-d.startCenter.y};
+    const uu=dot(u,u)||1,vv=dot(v,v)||1;
+    const signs={nw:[-1,-1],ne:[1,-1],se:[1,1],sw:[-1,1],n:[0,-1],e:[1,0],s:[0,1],w:[-1,0]}[d.handle]||[1,1];
+    let sx=1,sy=1;
+    if(signs[0]!==0){
+      const current=dot({x:p.x-d.startCenter.x,y:p.y-d.startCenter.y},u)/uu;
+      sx=clamp(current/signs[0],0.02,50);
+    }
+    if(signs[1]!==0){
+      const current=dot({x:p.x-d.startCenter.x,y:p.y-d.startCenter.y},v)/vv;
+      sy=clamp(current/signs[1],0.02,50);
+    }
+    if(e.shiftKey){
+      const uniform=Math.abs(sx-1)>Math.abs(sy-1)?sx:sy;
+      sx=sy=uniform;
+    }
+    s.corners=d.startCorners.map((pt,i)=>{
+      const sign=[-1,-1,1,1][i]!==undefined?[[-1,-1],[1,-1],[1,1],[-1,1]][i]:[1,1];
+      return{x:d.startCenter.x+u.x*sx*sign[0]+v.x*sy*sign[1],y:d.startCenter.y+u.y*sx*sign[0]+v.y*sy*sign[1]};
+    });
+    s.center=getPointsCenter(s.corners);
+    return;
+  }
+
+  if(d.type==='skew'){
+    const top={x:d.startCorners[1].x-d.startCorners[0].x,y:d.startCorners[1].y-d.startCorners[0].y};
+    const left={x:d.startCorners[3].x-d.startCorners[0].x,y:d.startCorners[3].y-d.startCorners[0].y};
+    const topLen=Math.hypot(top.x,top.y)||1,leftLen=Math.hypot(left.x,left.y)||1;
+    const tu={x:top.x/topLen,y:top.y/topLen},lv={x:left.x/leftLen,y:left.y/leftLen};
+    const delta={x:p.x-d.startPoint.x,y:p.y-d.startPoint.y};
+    const du=clamp(dot(delta,tu),-topLen*.9,topLen*.9);
+    const dv=clamp(dot(delta,lv),-leftLen*.9,leftLen*.9);
+    s.corners=clonePoints(d.startCorners);
+    if(d.handle==='n'){s.corners[0]=addScaled(s.corners[0],tu,du);s.corners[1]=addScaled(s.corners[1],tu,du);}
+    if(d.handle==='s'){s.corners[2]=addScaled(s.corners[2],tu,du);s.corners[3]=addScaled(s.corners[3],tu,du);}
+    if(d.handle==='e'){s.corners[1]=addScaled(s.corners[1],lv,dv);s.corners[2]=addScaled(s.corners[2],lv,dv);}
+    if(d.handle==='w'){s.corners[0]=addScaled(s.corners[0],lv,dv);s.corners[3]=addScaled(s.corners[3],lv,dv);}
+    s.center=getPointsCenter(s.corners);
+  }
+}
+
+function applyTransformSession(){
+  const s=transformSession;
+  if(!s)return;
+  const layer=layers.find(l=>l.id===s.layerId);
+  if(!layer){cancelTransform();return;}
+
+  const out=document.createElement('canvas');
+  out.width=W;out.height=H;
+  const octx=out.getContext('2d');
+  renderTransform(octx,s,-layer.offsetX,-layer.offsetY,24);
+  layer.ctx.clearRect(0,0,W,H);
+  layer.ctx.drawImage(out,0,0);
+
+  const previous=s.previousTool||'brush';
+  transformSession=null;
+  transformMode=null;
+  transformDrag=null;
+  hideTransformBar();
+  activeTool=previous;
+  wrap.style.cursor=activeTool==='move'?'move':activeTool==='pan'?'grab':'crosshair';
+  updateToolButtons();
+  requestRedraw();
+  renderLayers();
+  saveHistory();
+}
+
+function cancelTransform(){
+  const s=transformSession;
+  if(s){
+    const layer=layers.find(l=>l.id===s.layerId);
+    if(layer){layer.ctx.clearRect(0,0,W,H);layer.ctx.drawImage(s.srcFull,0,0);}
+    activeTool=s.previousTool||'brush';
+  }
+  transformSession=null;
+  transformMode=null;
+  transformDrag=null;
+  hideTransformBar();
+  wrap.style.cursor=activeTool==='move'?'move':activeTool==='pan'?'grab':'crosshair';
+  updateToolButtons();
+  requestRedraw();
+}
+
+function drawTransformPreview(ctx,s){renderTransform(ctx,s,0,0,12);}
+
+function renderTransform(ctx,s,offsetX=0,offsetY=0,subdivisions=16){
+  ctx.save();
+  ctx.imageSmoothingEnabled=true;
+  ctx.imageSmoothingQuality='high';
+  if(s.mode==='mesh')drawMeshTransform(ctx,s.srcCrop,s.mesh,offsetX,offsetY,Math.max(6,Math.floor(subdivisions/2)));
+  else drawQuadTransform(ctx,s.srcCrop,s.corners,offsetX,offsetY,subdivisions);
+  ctx.restore();
+}
+
+function drawQuadTransform(ctx,src,corners,offsetX,offsetY,subdivisions){
+  const w=src.width,h=src.height;
+  const Hm=getPerspectiveTransform([{x:0,y:0},{x:w,y:0},{x:w,y:h},{x:0,y:h}],corners);
+  if(!Hm)return;
+  for(let iy=0;iy<subdivisions;iy++)for(let ix=0;ix<subdivisions;ix++){
+    const x0=w*ix/subdivisions,x1=w*(ix+1)/subdivisions;
+    const y0=h*iy/subdivisions,y1=h*(iy+1)/subdivisions;
+    const p00=offsetPoint(projectPoint(Hm,x0,y0),offsetX,offsetY);
+    const p10=offsetPoint(projectPoint(Hm,x1,y0),offsetX,offsetY);
+    const p01=offsetPoint(projectPoint(Hm,x0,y1),offsetX,offsetY);
+    const p11=offsetPoint(projectPoint(Hm,x1,y1),offsetX,offsetY);
+    drawTexturedTriangle(ctx,src,{x:x0,y:y0},{x:x1,y:y0},{x:x0,y:y1},p00,p10,p01);
+    drawTexturedTriangle(ctx,src,{x:x1,y:y0},{x:x1,y:y1},{x:x0,y:y1},p10,p11,p01);
+  }
+}
+
+function drawMeshTransform(ctx,src,mesh,offsetX,offsetY,subdivisions){
+  const w=src.width,h=src.height;
+  for(let gy=0;gy<3;gy++)for(let gx=0;gx<3;gx++){
+    const q00=mesh[gy][gx],q10=mesh[gy][gx+1],q01=mesh[gy+1][gx],q11=mesh[gy+1][gx+1];
+    for(let iy=0;iy<subdivisions;iy++)for(let ix=0;ix<subdivisions;ix++){
+      const u0=ix/subdivisions,u1=(ix+1)/subdivisions;
+      const v0=iy/subdivisions,v1=(iy+1)/subdivisions;
+      const sx0=w*(gx+u0)/3,sx1=w*(gx+u1)/3;
+      const sy0=h*(gy+v0)/3,sy1=h*(gy+v1)/3;
+      const p00=offsetPoint(bilerp(q00,q10,q01,q11,u0,v0),offsetX,offsetY);
+      const p10=offsetPoint(bilerp(q00,q10,q01,q11,u1,v0),offsetX,offsetY);
+      const p01=offsetPoint(bilerp(q00,q10,q01,q11,u0,v1),offsetX,offsetY);
+      const p11=offsetPoint(bilerp(q00,q10,q01,q11,u1,v1),offsetX,offsetY);
+      drawTexturedTriangle(ctx,src,{x:sx0,y:sy0},{x:sx1,y:sy0},{x:sx0,y:sy1},p00,p10,p01);
+      drawTexturedTriangle(ctx,src,{x:sx1,y:sy0},{x:sx1,y:sy1},{x:sx0,y:sy1},p10,p11,p01);
+    }
+  }
+}
+
+function drawTexturedTriangle(ctx,src,s1,s2,s3,d1,d2,d3){
+  const t=transformTriangle(s1.x,s1.y,s2.x,s2.y,s3.x,s3.y,d1.x,d1.y,d2.x,d2.y,d3.x,d3.y);
+  if(!t)return;
+  const cx=(d1.x+d2.x+d3.x)/3,cy=(d1.y+d2.y+d3.y)/3;
+  const grow=p=>{const dx=p.x-cx,dy=p.y-cy,l=Math.hypot(dx,dy)||1;return{x:p.x+dx/l*.35,y:p.y+dy/l*.35};};
+  const c1=grow(d1),c2=grow(d2),c3=grow(d3);
+  ctx.save();
+  ctx.beginPath();ctx.moveTo(c1.x,c1.y);ctx.lineTo(c2.x,c2.y);ctx.lineTo(c3.x,c3.y);ctx.closePath();ctx.clip();
+  ctx.setTransform(t.a,t.b,t.c,t.d,t.e,t.f);
+  ctx.drawImage(src,0,0);
+  ctx.restore();
+}
+
+function drawTransformOverlay(ctx,s){
+  ctx.save();
+  ctx.lineWidth=1.5/zoom;
+  ctx.strokeStyle='#4a90d9';
+  ctx.fillStyle='#4a90d9';
+
+  if(s.mode==='mesh'){
+    for(let gy=0;gy<4;gy++){
+      ctx.beginPath();ctx.moveTo(s.mesh[gy][0].x,s.mesh[gy][0].y);
+      for(let gx=1;gx<4;gx++)ctx.lineTo(s.mesh[gy][gx].x,s.mesh[gy][gx].y);
+      ctx.stroke();
+    }
+    for(let gx=0;gx<4;gx++){
+      ctx.beginPath();ctx.moveTo(s.mesh[0][gx].x,s.mesh[0][gx].y);
+      for(let gy=1;gy<4;gy++)ctx.lineTo(s.mesh[gy][gx].x,s.mesh[gy][gx].y);
+      ctx.stroke();
+    }
+    for(let gy=0;gy<4;gy++)for(let gx=0;gx<4;gx++)drawControlPoint(ctx,s.mesh[gy][gx],4.5/zoom);
+  }else{
+    ctx.beginPath();
+    ctx.moveTo(s.corners[0].x,s.corners[0].y);
+    for(let i=1;i<4;i++)ctx.lineTo(s.corners[i].x,s.corners[i].y);
+    ctx.closePath();ctx.stroke();
+    const handles=getTransformHandles(s);
+    handles.forEach(h=>drawControlPoint(ctx,h,h.id==='rotate'?6/zoom:4.5/zoom,h.id==='rotate'));
+    if(s.mode==='rotate'){
+      const c=getPointsCenter(s.corners);
+      drawControlPoint(ctx,c,5/zoom,true);
+      ctx.beginPath();ctx.moveTo(c.x,c.y);ctx.lineTo(handles[0].x,handles[0].y);ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+function drawControlPoint(ctx,p,r,circle=false){
+  ctx.save();
+  ctx.fillStyle='#4a90d9';ctx.strokeStyle='#fff';ctx.lineWidth=1.5/zoom;
+  ctx.beginPath();
+  if(circle)ctx.arc(p.x,p.y,r,0,Math.PI*2);else ctx.rect(p.x-r,p.y-r,r*2,r*2);
+  ctx.fill();ctx.stroke();
+  ctx.restore();
+}
+
+function getTransformHandles(s){
+  const c=s.corners;
+  const mids={
+    n:midpoint(c[0],c[1]),e:midpoint(c[1],c[2]),s:midpoint(c[2],c[3]),w:midpoint(c[3],c[0])
+  };
+  if(s.mode==='scale')return[
+    {id:'nw',...c[0]},{id:'ne',...c[1]},{id:'se',...c[2]},{id:'sw',...c[3]},
+    {id:'n',...mids.n},{id:'e',...mids.e},{id:'s',...mids.s},{id:'w',...mids.w}
+  ];
+  if(s.mode==='rotate'){
+    const down={x:midpoint(c[3],c[2]).x-mids.n.x,y:midpoint(c[3],c[2]).y-mids.n.y};
+    const len=Math.hypot(down.x,down.y)||1;
+    return[{id:'rotate',x:mids.n.x-down.x/len*(34/zoom),y:mids.n.y-down.y/len*(34/zoom)}];
+  }
+  if(s.mode==='skew')return[{id:'n',...mids.n},{id:'e',...mids.e},{id:'s',...mids.s},{id:'w',...mids.w}];
+  if(s.mode==='perspective')return[{id:'nw',...c[0]},{id:'ne',...c[1]},{id:'se',...c[2]},{id:'sw',...c[3]}];
+  return[];
+}
+
+function getTransformHandleAt(s,p){
+  return getTransformHandles(s).find(h=>Math.hypot(h.x-p.x,h.y-p.y)<=12/zoom)||null;
+}
+
+// ---- Geometry helpers ----
+function clonePoints(points){return points.map(p=>({x:p.x,y:p.y}));}
+function cloneMesh(mesh){return mesh.map(row=>clonePoints(row));}
+function getPointsCenter(points){const t=points.reduce((a,p)=>({x:a.x+p.x,y:a.y+p.y}),{x:0,y:0});return{x:t.x/points.length,y:t.y/points.length};}
+function midpoint(a,b){return{x:(a.x+b.x)/2,y:(a.y+b.y)/2};}
+function dot(a,b){return a.x*b.x+a.y*b.y;}
+function clamp(v,min,max){return Math.max(min,Math.min(max,v));}
+function addScaled(p,v,s){return{x:p.x+v.x*s,y:p.y+v.y*s};}
+function offsetPoint(p,x,y){return{x:p.x+x,y:p.y+y};}
+function rotatePoint(p,c,a){const cos=Math.cos(a),sin=Math.sin(a),x=p.x-c.x,y=p.y-c.y;return{x:c.x+x*cos-y*sin,y:c.y+x*sin+y*cos};}
+function pointInPolygon(p,pts){let inside=false;for(let i=0,j=pts.length-1;i<pts.length;j=i++){const a=pts[i],b=pts[j];if(((a.y>p.y)!==(b.y>p.y))&&p.x<(b.x-a.x)*(p.y-a.y)/(b.y-a.y)+a.x)inside=!inside;}return inside;}
+function bilerp(p00,p10,p01,p11,u,v){return{x:(1-v)*((1-u)*p00.x+u*p10.x)+v*((1-u)*p01.x+u*p11.x),y:(1-v)*((1-u)*p00.y+u*p10.y)+v*((1-u)*p01.y+u*p11.y)};}
+
+function getPerspectiveTransform(src,dst){
+  const A=[];
+  for(let i=0;i<4;i++){
+    const x=src[i].x,y=src[i].y,u=dst[i].x,v=dst[i].y;
+    A.push([x,y,1,0,0,0,-u*x,-u*y,u]);
+    A.push([0,0,0,x,y,1,-v*x,-v*y,v]);
+  }
+  const h=solveLinear8(A);
+  return h;
+}
+
+function solveLinear8(A){
+  const n=8;
+  for(let col=0;col<n;col++){
+    let pivot=col;
+    for(let r=col+1;r<n;r++)if(Math.abs(A[r][col])>Math.abs(A[pivot][col]))pivot=r;
+    if(Math.abs(A[pivot][col])<1e-10)return null;
+    [A[col],A[pivot]]=[A[pivot],A[col]];
+    const div=A[col][col];
+    for(let c=col;c<=n;c++)A[col][c]/=div;
+    for(let r=0;r<n;r++){
+      if(r===col)continue;
+      const f=A[r][col];
+      for(let c=col;c<=n;c++)A[r][c]-=f*A[col][c];
+    }
+  }
+  return A.map(row=>row[n]);
+}
+
+function projectPoint(H,x,y){
+  const d=H[6]*x+H[7]*y+1;
+  if(Math.abs(d)<1e-10)return{x:0,y:0};
+  return{x:(H[0]*x+H[1]*y+H[2])/d,y:(H[3]*x+H[4]*y+H[5])/d};
+}
+
+function transformTriangle(x1,y1,x2,y2,x3,y3,tx1,ty1,tx2,ty2,tx3,ty3){
+  const denominator=x1*(y3-y2)+x2*(y1-y3)+x3*(y2-y1);
+  if(Math.abs(denominator)<1e-10)return null;
+  const A=(tx1*(y3-y2)+tx2*(y1-y3)+tx3*(y2-y1))/denominator;
+  const B=(tx1*(x2-x3)+tx2*(x3-x1)+tx3*(x1-x2))/denominator;
+  const C=tx1-A*x1-B*y1;
+  const D=(ty1*(y3-y2)+ty2*(y1-y3)+ty3*(y2-y1))/denominator;
+  const E=(ty1*(x2-x3)+ty2*(x3-x1)+ty3*(x1-x2))/denominator;
+  const F=ty1-D*x1-E*y1;
+  const det=A*E-B*D;
+  if(Math.abs(det)<1e-10)return null;
+  return{a:A,b:D,c:B,d:E,e:C,f:F};
+}
+
+// ============================================================
 // EXPORT
 // ============================================================
 function exportPNG(){
@@ -1279,6 +2009,7 @@ function exportPNG(){
   ctx.fillStyle=BG;ctx.fillRect(0,0,W,H);
   // Draw layers at their offsets
   layers.forEach(l=>{if(!l.visible)return;ctx.save();ctx.globalAlpha=l.opacity;ctx.globalCompositeOperation=l.blend;ctx.drawImage(l.canvas,l.offsetX,l.offsetY);ctx.restore();});
+  if(transformSession)renderTransform(ctx,transformSession,0,0,24);
   const a=document.createElement('a');a.download='CreativeSketchPro-'+Date.now()+'.png';a.href=c.toDataURL('image/png');a.click();
 }
 
