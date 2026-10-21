@@ -149,7 +149,7 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
     <button id="tool-eraser" class="tool-btn" title="Eraser">🧹 Eraser</button>
     <button id="tool-pan" class="tool-btn" title="Pan (Space)">✋ Pan</button>
     <button id="tool-move" class="tool-btn" title="Move Object / Selection">↔️ Move</button>
-    <button id="tool-smudge" class="tool-btn" title="Smudge Mode (finger blending)">👆 Smudge</button>
+    <button id="tool-smudge" class="tool-btn" title="Smudge Mode — smears paint using the active brush's shape, texture, and size">👆 Smudge</button>
     <button id="tool-text" class="tool-btn" title="Text tool for titles and large headlines">🔤 Text</button>
     <div class="sep"></div>
     <button id="btn-undo" title="Undo (Ctrl+Z)">↩️ Undo</button>
@@ -192,6 +192,7 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
           <div style="display:flex;align-items:center;gap:6px">
             <input type="color" id="color-picker" value="#000000">
             <input type="text" id="color-hex" value="#000000" maxlength="7">
+            <button id="btn-eyedropper" type="button" title="Pick a color from the canvas — or hold Alt and click while painting" style="padding:3px 8px;background:#333;border:1px solid #555;color:#ddd;border-radius:4px;cursor:pointer;font-size:13px">💧</button>
           </div>
           <div id="swatches"></div>
         </div>
@@ -470,6 +471,7 @@ let internalClipboard=null; // {canvas,x,y,w,h,origin}
 let isDrawing=false, isPanning=false, isMoving=false;
 let smudgeMode=false;
 let spaceDown=false;
+let pickingColor=false, pickReturnTool=null;
 
 // ---- SELECTION STATE ----
 let selection=null; // {x,y,w,h,srcCanvas,srcX,srcY} or null
@@ -760,6 +762,12 @@ function wireEvents(){
     try{wrap.setPointerCapture(e.pointerId);}catch(_){ }
     const p=getPoint(e);
 
+    // Eyedropper: 💧 picker mode, or Alt+click with any paint tool.
+    if(pickingColor||(e.altKey&&activeTool!=='pan'&&!spaceDown)){
+      pickColorAt(p);
+      return;
+    }
+
     if(spaceDown||activeTool==='pan'){isPanning=true;lastPoint={x:e.clientX,y:e.clientY};return;}
 
     // An active transform owns the canvas until it is applied or cancelled.
@@ -865,6 +873,7 @@ function wireEvents(){
     if(e.key==='Enter'&&transformSession){e.preventDefault();applyTransformSession();return;}
     if(e.key==='Enter'&&textSession&&(e.ctrlKey||e.metaKey)){e.preventDefault();commitTextSession();return;}
     if(e.key==='Escape'){
+      if(pickingColor){e.preventDefault();pickingColor=false;activeTool=pickReturnTool||'brush';pickReturnTool=null;wrap.style.cursor=cursorForTool();updateToolButtons();requestRedraw();return;}
       if(transformSession){e.preventDefault();cancelTransform();return;}
       if(textSession){e.preventDefault();cancelTextSession();return;}
       if(selection){e.preventDefault();selection.floating?cancelMoveSelection():(selection=null,requestRedraw());return;}
@@ -899,6 +908,43 @@ function getPoint(e){
 }
 
 function cursorForTool(){return activeTool==='move'?'move':activeTool==='pan'?'grab':activeTool==='text'?'text':'crosshair';}
+
+// ============================================================
+// EYEDROPPER — Alt+click or 💧 button picks the visible canvas color
+// ============================================================
+function sampleCanvasColor(p){
+  const x=clamp(Math.floor(p.x),0,W-1),y=clamp(Math.floor(p.y),0,H-1);
+  const c=document.createElement('canvas');c.width=1;c.height=1;
+  const cctx=c.getContext('2d',{willReadFrequently:true});
+  cctx.fillStyle=BG;cctx.fillRect(0,0,1,1); // transparent areas pick the paper color
+  layers.forEach(l=>{
+    if(!l.visible)return;
+    cctx.save();
+    cctx.globalAlpha=l.opacity;
+    cctx.globalCompositeOperation=l.blend;
+    cctx.drawImage(l.canvas,x-l.offsetX,y-l.offsetY,1,1,0,0,1,1);
+    cctx.restore();
+  });
+  const d=cctx.getImageData(0,0,1,1).data;
+  const hex='#'+[d[0],d[1],d[2]].map(v=>v.toString(16).padStart(2,'0')).join('');
+  return hex;
+}
+
+function pickColorAt(p){
+  const hex=sampleCanvasColor(p);
+  setColor(hex);
+  statusBar.textContent='Picked color '+hex+' from the canvas.';
+  if(pickingColor){
+    pickingColor=false;
+    activeTool=pickReturnTool||'brush';
+    pickReturnTool=null;
+    wrap.style.cursor=cursorForTool();
+    updateToolButtons();
+  }
+  requestRedraw();
+  return hex;
+}
+
 
 // ============================================================
 // MOVE TOOL — free object / selection movement on one layer
@@ -1392,6 +1438,30 @@ function getBrushTip(size){
   return c;
 }
 
+// Smudge mask follows the ACTIVE brush: custom free-form brushes contribute their
+// real silhouette (scaled to the current size, aspect ratio preserved); parametric
+// brushes contribute their generated tip (shape, roundness, angle, hardness, grain).
+const smudgeMaskCache={key:'',mask:null};
+function getSmudgeMask(size){
+  const b=customBrushes.find(cb=>cb.id===activeBrushId);
+  if(b){
+    const src=b.mask||(b.canvas&&b.canvas.width?b.canvas:(b.img&&b.img.complete&&b.img.naturalWidth>0?b.img:null));
+    if(src){
+      const scale=Math.max(2,size)/Math.max(src.width,src.height);
+      const w=Math.max(1,Math.round(src.width*scale)),h=Math.max(1,Math.round(src.height*scale));
+      const key=b.id+'|'+w+'x'+h;
+      if(smudgeMaskCache.key===key)return smudgeMaskCache.mask;
+      const c=document.createElement('canvas');c.width=w;c.height=h;
+      const mctx=c.getContext('2d');
+      mctx.imageSmoothingEnabled=true;mctx.imageSmoothingQuality='high';
+      mctx.drawImage(src,0,0,w,h);
+      smudgeMaskCache.key=key;smudgeMaskCache.mask=c;
+      return c;
+    }
+  }
+  return getBrushTip(size);
+}
+
 function stampTip(ctx,x,y,size,opacity){
   const tip=getBrushTip(size);
   ctx.globalAlpha=Math.min(1,opacity);
@@ -1414,8 +1484,8 @@ function stampSmudge(ctx,point,size,opacity){
   // Read source pixels from canvas
   const sourceData=ctx.getImageData(Math.max(0,Math.floor(sx-r)),Math.max(0,Math.floor(sy-r)),dim,dim);
 
-  // Create brush tip mask
-  const tip=getBrushTip(size);
+  // Create brush tip mask from the ACTIVE brush (custom silhouette or parametric tip)
+  const tip=getSmudgeMask(size);
   const tipCtx=tip.getContext('2d');
   const tipData=tipCtx.getImageData(0,0,tip.width,tip.height);
 
@@ -1430,15 +1500,17 @@ function stampSmudge(ctx,point,size,opacity){
   const oy=Math.floor((dim-tip.height)/2);
 
   for(let py=0;py<dim;py++){
+    const ly=py-oy;
+    if(ly<0||ly>=tip.height)continue;
     for(let px=0;px<dim;px++){
-      const ti=((py-oy)*tip.width+(px-ox))*4;
+      const lx=px-ox;
+      if(lx<0||lx>=tip.width)continue;
+      const ti=(ly*tip.width+lx)*4;
       const si=(py*dim+px)*4;
       const oi=(py*dim+px)*4;
-      if(ti>=0&&ti<tipData.data.length-3){
-        const maskA=tipData.data[ti+3]/255;
-        const a=maskA*opacity*0.6;
-        o[oi]=s[si];o[oi+1]=s[si+1];o[oi+2]=s[si+2];o[oi+3]=Math.round(a*255);
-      }
+      const maskA=tipData.data[ti+3]/255;
+      const a=maskA*opacity*0.6;
+      o[oi]=s[si];o[oi+1]=s[si+1];o[oi+2]=s[si+2];o[oi+3]=Math.round(a*255);
     }
   }
   octx.putImageData(oImg,0,0);
@@ -1573,7 +1645,7 @@ function drawChalk(ctx,x,y,size,color,opacity){ctx.globalAlpha=opacity*(0.5+Math
 function drawAirbrush(ctx,x,y,size,color,opacity,flow){const f=flow||0.3;ctx.globalAlpha=opacity*f;const g=ctx.createRadialGradient(x,y,0,x,y,size/2);g.addColorStop(0,color);g.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=g;ctx.beginPath();ctx.arc(x,y,size/2,0,Math.PI*2);ctx.fill();}
 function drawEraser(ctx,x,y,size,opacity){const r=size/2;ctx.globalCompositeOperation='destination-out';ctx.globalAlpha=opacity;ctx.fillStyle='rgba(0,0,0,1)';ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();}
 function drawBlur(ctx,x,y,size,opacity){const r=Math.floor(size/2);const sx=Math.max(0,x-r),sy=Math.max(0,y-r);try{const id=ctx.getImageData(sx,sy,r*2,r*2);const b=boxBlur(id,Math.max(1,Math.floor(r/4)));ctx.globalAlpha=opacity;ctx.putImageData(b,sx,sy);}catch{}}
-function drawSmudge(ctx,x,y,size,opacity){if(!smudgeSnapshot)return;const r=Math.floor(size/2);if(r<2)return;const sx=Math.max(0,x-r),sy=Math.max(0,y-r);const cw=Math.min(smudgeSnapshot.width-sx,r*2),ch=Math.min(smudgeSnapshot.height-sy,r*2);if(cw<=0||ch<=0)return;let ox=0,oy=0;if(points.length>=3){const c=points[points.length-1],p=points[points.length-3];const a=Math.atan2(c.y-p.y,c.x-p.x);const s=size*0.4;ox=Math.cos(a)*s;oy=Math.sin(a)*s;}else{ox=rand(-r*0.2,r*0.2);oy=rand(-r*0.2,r*0.2);}const sc=document.createElement('canvas');sc.width=cw;sc.height=ch;const sctx=sc.getContext('2d');sctx.clearRect(0,0,cw,ch);sctx.drawImage(smudgeSnapshot,sx,sy,cw,ch,0,0,cw,ch);sctx.globalCompositeOperation='destination-in';const cx=cw/2,cy=ch/2;const g=sctx.createRadialGradient(cx,cy,0,cx,cy,r);g.addColorStop(0,'rgba(255,255,255,1)');g.addColorStop(0.7,'rgba(255,255,255,0.6)');g.addColorStop(1,'rgba(255,255,255,0)');sctx.fillStyle=g;sctx.fillRect(0,0,cw,ch);sctx.globalCompositeOperation='source-over';ctx.globalAlpha=opacity*0.55;ctx.drawImage(sc,sx+ox,sy+oy);}
+function drawSmudge(ctx,x,y,size,opacity){if(!smudgeSnapshot)return;const r=Math.floor(size/2);if(r<2)return;const sx=Math.max(0,x-r),sy=Math.max(0,y-r);const cw=Math.min(smudgeSnapshot.width-sx,r*2),ch=Math.min(smudgeSnapshot.height-sy,r*2);if(cw<=0||ch<=0)return;let ox=0,oy=0;if(points.length>=3){const c=points[points.length-1],p=points[points.length-3];const a=Math.atan2(c.y-p.y,c.x-p.x);const s=size*0.4;ox=Math.cos(a)*s;oy=Math.sin(a)*s;}else{ox=rand(-r*0.2,r*0.2);oy=rand(-r*0.2,r*0.2);}const sc=document.createElement('canvas');sc.width=cw;sc.height=ch;const sctx=sc.getContext('2d');sctx.clearRect(0,0,cw,ch);sctx.drawImage(smudgeSnapshot,sx,sy,cw,ch,0,0,cw,ch);sctx.globalCompositeOperation='destination-in';const mask=getSmudgeMask(size);sctx.drawImage(mask,(cw-mask.width)/2,(ch-mask.height)/2);sctx.globalCompositeOperation='source-over';ctx.globalAlpha=opacity*0.55;ctx.drawImage(sc,sx+ox,sy+oy);}
 function drawShaded(ctx,x,y,size,color,opacity){ctx.globalAlpha=opacity;ctx.strokeStyle=color;ctx.lineWidth=size*2;ctx.lineCap='round';if(points.length<2)return;const c=points[points.length-1],p=points[points.length-2];ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(c.x,c.y);ctx.stroke();ctx.globalAlpha=opacity*0.25;ctx.lineWidth=size;const a=Math.atan2(c.y-p.y,c.x-p.x);const pp=a+Math.PI/2;const len=size*3;for(let i=-2;i<=2;i++){const ox=Math.cos(pp)*i*size,oy=Math.sin(pp)*i*size;ctx.beginPath();ctx.moveTo(c.x+ox,c.y+oy);ctx.lineTo(c.x+ox+Math.cos(a)*len,c.y+oy+Math.sin(a)*len);ctx.stroke();}}
 function drawChrome(ctx,x,y,size,color,opacity){if(points.length<2)return;const c=points[points.length-1],p=points[points.length-2];const a=Math.atan2(c.y-p.y,c.x-p.x);const pp=a+Math.PI/2;ctx.globalAlpha=opacity;ctx.strokeStyle=color;ctx.lineWidth=size;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(c.x,c.y);ctx.stroke();ctx.globalAlpha=opacity*0.6;ctx.strokeStyle='#fff';ctx.lineWidth=size*0.3;const off=size*0.3;ctx.beginPath();ctx.moveTo(p.x+Math.cos(pp)*off,p.y+Math.sin(pp)*off);ctx.lineTo(c.x+Math.cos(pp)*off,c.y+Math.sin(pp)*off);ctx.stroke();ctx.globalAlpha=opacity*0.4;ctx.strokeStyle='#000';ctx.beginPath();ctx.moveTo(p.x-Math.cos(pp)*off,p.y-Math.sin(pp)*off);ctx.lineTo(c.x-Math.cos(pp)*off,c.y-Math.sin(pp)*off);ctx.stroke();}
 function drawFur(ctx,x,y,size,color,opacity){if(points.length<2)return;const c=points[points.length-1],p=points[points.length-2];const a=Math.atan2(c.y-p.y,c.x-p.x);const pp=a+Math.PI/2;ctx.globalAlpha=opacity*0.6;ctx.strokeStyle=color;ctx.lineWidth=size*0.5;ctx.lineCap='round';for(let i=0;i<3;i++){const off=(Math.random()-0.5)*size*2;const len=size*rand(1,3);const fa=pp+rand(-0.3,0.3);ctx.beginPath();ctx.moveTo(c.x+Math.cos(pp)*off,c.y+Math.sin(pp)*off);ctx.lineTo(c.x+Math.cos(pp)*off+Math.cos(fa)*len,c.y+Math.sin(pp)*off+Math.sin(fa)*len);ctx.stroke();}}
@@ -1737,6 +1809,12 @@ function wireProperties(){
   bind('grain-scale-slider','grainScale');
 
   document.getElementById('color-hex').onchange=(e)=>{const v=e.target.value;if(/^#[0-9A-Fa-f]{6}$/.test(v)){setColor(v);}};
+  document.getElementById('btn-eyedropper').onclick=()=>{
+    pickingColor=true;
+    pickReturnTool=activeTool;
+    wrap.style.cursor='crosshair';
+    statusBar.textContent='Eyedropper: click the canvas to pick a color (Esc to cancel). Tip: Alt+click picks while painting.';
+  };
   document.getElementById('blend-mode').onchange=(e)=>{brushSettings.blend=e.target.value;};
   document.getElementById('pressure-toggle').onchange=(e)=>{brushSettings.usePressure=e.target.checked;document.getElementById('pressure-opts').style.display=e.target.checked?'block':'none';};
   document.getElementById('new-bg').onchange=(e)=>{document.getElementById('new-bg-text').value=e.target.value;};
