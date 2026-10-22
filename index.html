@@ -145,6 +145,7 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
 
   <!-- ===== TOOLBAR ===== -->
   <div id="toolbar">
+    <button id="btn-toggle-left-panel" class="active" title="Show/Hide the Properties panel — more canvas space on small screens">◧</button>
     <button id="tool-brush" class="tool-btn active" title="Brush">🖌️ Brush</button>
     <button id="tool-eraser" class="tool-btn" title="Eraser">🧹 Eraser</button>
     <button id="tool-pan" class="tool-btn" title="Pan (Space)">✋ Pan</button>
@@ -158,7 +159,7 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
     <button id="btn-zoom-out" title="Zoom Out">−</button>
     <span class="zoom-label" id="zoom-label">100%</span>
     <button id="btn-zoom-in" title="Zoom In">+</button>
-    <button id="btn-reset-view" title="Reset View">⟲</button>
+    <button id="btn-reset-view" title="Fit Canvas to View">⟲</button>
     <div class="sep"></div>
     <button id="btn-canvas-size" title="Canvas Size">📐 Canvas</button>
     <button id="btn-clear" title="Clear All">🗑️ Clear</button>
@@ -180,6 +181,7 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
         <div class="dropdown-item" data-transform="mesh">🕸️ Mesh Distort</div>
       </div>
     </div>
+    <button id="btn-toggle-right-panel" class="active" title="Show/Hide the Brushes, Import & Layers panels — more canvas space on small screens">◨</button>
   </div>
 
   <div id="main">
@@ -281,7 +283,7 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
       <div id="canvas-container">
         <canvas id="display-canvas"></canvas>
       </div>
-      <div id="status-bar">100% | 1200×800</div>
+      <div id="status-bar">100% | 2100×2900</div>
       <div id="transform-bar">
         <span id="transform-title">Transform</span>
         <label id="mesh-density-wrap">Mesh points
@@ -351,6 +353,11 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
             <button id="btn-duplicate-layer" style="flex:1;padding:4px;background:#333;border:1px solid #444;color:#ddd;font-size:11px;border-radius:3px;cursor:pointer" title="Duplicate active layer (Ctrl+D)">⧉ Duplicate</button>
             <button id="btn-del-layer" style="flex:1;padding:4px;background:#333;border:1px solid #444;color:#ddd;font-size:11px;border-radius:3px;cursor:pointer">🗑️ Del</button>
           </div>
+          <div style="display:flex;gap:4px;margin-bottom:8px">
+            <button id="btn-merge-down" style="flex:1;padding:4px;background:#333;border:1px solid #444;color:#ddd;font-size:11px;border-radius:3px;cursor:pointer" title="Merge the active layer into the layer below">⬇ Merge Down</button>
+            <button id="btn-merge-visible" style="flex:1;padding:4px;background:#333;border:1px solid #444;color:#ddd;font-size:11px;border-radius:3px;cursor:pointer" title="Merge all visible layers into a single layer">🗜 Merge Visible</button>
+            <button id="btn-new-group" style="flex:1;padding:4px;background:#333;border:1px solid #444;color:#ddd;font-size:11px;border-radius:3px;cursor:pointer" title="Create a layer group containing the active layer">🗂 Group</button>
+          </div>
           <div id="layer-list"></div>
         </div>
       </div>
@@ -364,11 +371,11 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
     <h3>Canvas Size</h3>
     <div class="modal-row">
       <label>Width</label>
-      <input type="number" id="new-width" min="1" max="10000" value="1200">
+      <input type="number" id="new-width" min="1" max="10000" value="2100">
     </div>
     <div class="modal-row">
       <label>Height</label>
-      <input type="number" id="new-height" min="1" max="10000" value="800">
+      <input type="number" id="new-height" min="1" max="10000" value="2900">
     </div>
     <div class="modal-row">
       <label>Background</label>
@@ -451,7 +458,7 @@ const APP_NAME='Creative Sketch Pro V8';
 const APP_AUTHOR='Prof. Mohammad Lataifeh';
 const APP_CONTACT='lataifeh@gmail.com';
 
-let W=1200, H=800, BG='#ffffff';
+let W=2100, H=2900, BG='#ffffff';
 let zoom=1, panX=0, panY=0;
 let activeTool='brush';
 let activeBrushId='pen';
@@ -461,10 +468,13 @@ let lastBrushCat='basic';
 let brushSettings={size:5,opacity:1,color:'#000000',blend:'source-over',spacing:0.1,jitter:0,hardness:1,flow:0.5,usePressure:true,minSize:0.15,minOp:0.2,tipShape:'round',roundness:1,angle:0,grain:0,grainScale:2};
 let activeLayerId='layer-1';
 let layers=[];
+let layerGroups=[]; // {id,name,visible,expanded}; layers carry .group (group id) or null
 let customBrushes=[];
 let history=[];
 let historyIndex=-1;
 const HISTORY_LIMIT=200;
+const HISTORY_BYTE_BUDGET=1500*1024*1024; // ~1.5 GB safety budget for large canvases
+let historyBytes=0;
 let historyLimitNotified=false;
 let internalClipboard=null; // {canvas,x,y,w,h,origin}
 
@@ -542,17 +552,44 @@ function init(){
   wireBrushPanel();
   wireImportPanel();
   wireTextPanel();
+
+  // Small screens (iPads etc.): collapse both side panels, then fit the canvas.
+  requestAnimationFrame(()=>{
+    if(window.innerWidth<1280){
+      setPanelVisible('left',false);
+      setPanelVisible('right',false);
+    }
+    fitCanvasToView();
+  });
+}
+
+// ---- PANEL SHOW/HIDE — more working space on small devices ----
+function setPanelVisible(side,visible){
+  const el=document.getElementById(side==='left'?'left-panel':'right-panels');
+  el.style.display=visible?'':'none';
+  document.getElementById('btn-toggle-'+side+'-panel').classList.toggle('active',visible);
+  // Canvas wrap gains/loses space — keep the view fitted after the layout settles.
+  requestAnimationFrame(()=>requestRedraw());
+}
+
+function fitCanvasToView(){
+  const availW=Math.max(50,wrap.clientWidth-24),availH=Math.max(50,wrap.clientHeight-24);
+  zoom=clamp(Math.min(availW/W,availH/H),0.05,1);
+  panX=Math.max(12,(wrap.clientWidth-W*zoom)/2);
+  panY=12;
+  updateDisplay();
 }
 
 // ============================================================
 // LAYER SYSTEM
 // ============================================================
 function addLayer(name, isBg=false){
+  const previous=getActiveLayer();
   const id='layer-'+Date.now()+'-'+Math.random().toString(36).slice(2,8);
   const c=document.createElement('canvas');
   c.width=W; c.height=H;
   const ctx=c.getContext('2d',{willReadFrequently:true});
-  const layer={id,name,canvas:c,ctx,visible:true,opacity:1,blend:'source-over',locked:false,offsetX:0,offsetY:0};
+  const layer={id,name,canvas:c,ctx,visible:true,opacity:1,blend:'source-over',locked:false,offsetX:0,offsetY:0,group:(previous&&!isBg)?previous.group||null:null};
   layers.push(layer);
   activeLayerId=layer.id;
   saveHistory();
@@ -581,9 +618,10 @@ function duplicateLayer(id=activeLayerId){
     visible:source.visible,
     opacity:source.opacity,
     blend:source.blend,
-    locked:source.locked,
+    locked:false,
     offsetX:source.offsetX,
-    offsetY:source.offsetY
+    offsetY:source.offsetY,
+    group:source.group||null
   };
   layers.splice(sourceIndex+1,0,copy);
   activeLayerId=copy.id;
@@ -593,16 +631,42 @@ function duplicateLayer(id=activeLayerId){
   return copy;
 }
 
-function renderLayers(){
-  const list=document.getElementById('layer-list');
-  list.innerHTML='';
-  [...layers].reverse().forEach((layer,idx)=>{
-    const realIdx=layers.length-1-idx;
-    const div=document.createElement('div');
-    div.className='layer-item'+(layer.id===activeLayerId?' active':'');
-    div.innerHTML=`<div style="display:flex;align-items:center;gap:6px">
+function isLayerEffectivelyVisible(l){
+  if(!l.visible)return false;
+  if(l.group){
+    const g=layerGroups.find(gr=>gr.id===l.group);
+    if(g&&!g.visible)return false;
+  }
+  return true;
+}
+
+function pruneEmptyGroups(){
+  layerGroups=layerGroups.filter(g=>layers.some(l=>l.group===g.id));
+}
+
+function buildGroupRow(g){
+  const div=document.createElement('div');
+  div.className='layer-item group-item';
+  div.style.background='#262626';
+  div.innerHTML=`<div style="display:flex;align-items:center;gap:6px">
+      <button onclick="toggleGroupExpanded('${g.id}')" title="Collapse/expand group" style="background:none;border:none;color:#ddd;cursor:pointer;font-size:12px;width:14px">${g.expanded?'▾':'▸'}</button>
+      <button onclick="toggleGroupVisibility('${g.id}')" title="Show/hide the whole group" style="background:none;border:none;color:${g.visible?'#ddd':'#666'};cursor:pointer;font-size:12px">${g.visible?'👁️':'🚫'}</button>
+      <span>🗂 ${g.name}</span>
+    </div>
+    <div class="layer-actions">
+      <button onclick="addActiveLayerToGroup('${g.id}')" title="Move the active layer into this group">⇥ Add Active</button>
+      <button onclick="dissolveGroup('${g.id}')" title="Ungroup all members (layers are kept)">Ungroup</button>
+    </div>`;
+  return div;
+}
+
+function buildLayerRow(layer,realIdx,indented){
+  const div=document.createElement('div');
+  div.className='layer-item'+(layer.id===activeLayerId?' active':'');
+  if(indented)div.style.marginLeft='16px';
+  div.innerHTML=`<div style="display:flex;align-items:center;gap:6px">
       <button onclick="toggleLayerVisibility('${layer.id}')" style="background:none;border:none;color:${layer.visible?'#ddd':'#666'};cursor:pointer;font-size:12px">${layer.visible?'👁️':'🚫'}</button>
-      <span>${layer.name}</span>
+      <span>${layer.locked?'🔒 ':''}${layer.name}</span>
       <span style="font-size:10px;color:#888;margin-left:auto">${Math.round(layer.offsetX)},${Math.round(layer.offsetY)}</span>
     </div>
     <input type="range" min="0" max="100" value="${layer.opacity*100}" oninput="setLayerOpacity('${layer.id}',this.value)">
@@ -612,12 +676,33 @@ function renderLayers(){
     <div class="layer-actions">
       <button onclick="moveLayer(${realIdx},1)">⬆</button>
       <button onclick="moveLayer(${realIdx},-1)">⬇</button>
+      <button onclick="toggleLayerLock('${layer.id}')" title="${layer.locked?'Unlock this layer':'Lock — blocks painting, moving, transform, merging, and deleting'}">${layer.locked?'🔒':'🔓'}</button>
+      ${layer.group?`<button onclick="ungroupLayer('${layer.id}')" title="Remove this layer from its group">⇤</button>`:''}
       <button onclick="duplicateLayer('${layer.id}')">Dup</button>
-      <button onclick="resetLayerOffset('${layer.id}')">⟲ Reset Pos</button>
+      <button onclick="resetLayerOffset('${layer.id}')" title="Reset layer position">⟲</button>
       <button onclick="deleteLayer('${layer.id}')">Del</button>
     </div>`;
-    div.onclick=(e)=>{if(!e.target.closest('button')&&!e.target.closest('input')&&!e.target.closest('select'))activeLayerId=layer.id;renderLayers();};
-    list.appendChild(div);
+  div.onclick=(e)=>{if(!e.target.closest('button')&&!e.target.closest('input')&&!e.target.closest('select'))activeLayerId=layer.id;renderLayers();};
+  return div;
+}
+
+function renderLayers(){
+  const list=document.getElementById('layer-list');
+  list.innerHTML='';
+  const seenGroups=new Set();
+  [...layers].reverse().forEach((layer,idx)=>{
+    const realIdx=layers.length-1-idx;
+    if(layer.group){
+      const g=layerGroups.find(gr=>gr.id===layer.group);
+      if(g){
+        if(!seenGroups.has(g.id)){
+          seenGroups.add(g.id);
+          list.appendChild(buildGroupRow(g));
+        }
+        if(!g.expanded)return; // collapsed group hides its member rows
+      }
+    }
+    list.appendChild(buildLayerRow(layer,realIdx,!!layer.group));
   });
 }
 
@@ -634,26 +719,149 @@ function setLayerBlend(id,value){
   saveHistory();
 }
 function moveLayer(idx,dir){const ni=idx+dir;if(ni<0||ni>=layers.length)return;[layers[idx],layers[ni]]=[layers[ni],layers[idx]];renderLayers();updateDisplay();}
-function deleteLayer(id){if(layers.length<=1)return;layers=layers.filter(l=>l.id!==id);activeLayerId=layers[layers.length-1].id;renderLayers();updateDisplay();}
+function deleteLayer(id){
+  const target=layers.find(l=>l.id===id);
+  if(!target||layers.length<=1)return;
+  if(target.locked){alert('This layer is locked. Unlock it before deleting.');return;}
+  layers=layers.filter(l=>l.id!==id);
+  pruneEmptyGroups();
+  activeLayerId=layers[layers.length-1].id;
+  renderLayers();updateDisplay();
+}
+
+// ---- LAYER LOCK ----
+function toggleLayerLock(id){
+  const l=layers.find(x=>x.id===id);if(!l)return;
+  l.locked=!l.locked;
+  renderLayers();
+  saveHistory();
+  statusBar.textContent=(l.locked?'🔒 Locked ':'🔓 Unlocked ')+l.name+'.';
+}
+
+// ---- LAYER GROUPS ----
+function createLayerGroup(){
+  if(transformSession){alert('Apply or cancel the active transform before grouping layers.');return;}
+  const layer=getActiveLayer();
+  if(!layer)return;
+  const g={id:'group-'+Date.now()+'-'+Math.random().toString(36).slice(2,6),name:'Group '+(layerGroups.length+1),visible:true,expanded:true};
+  layerGroups.push(g);
+  layer.group=g.id;
+  renderLayers();
+  saveHistory();
+  statusBar.textContent='Created '+g.name+' with '+layer.name+'. Use ⇥ Add Active on the group to add more layers.';
+}
+
+function dissolveGroup(gid){
+  layers.forEach(l=>{if(l.group===gid)l.group=null;});
+  layerGroups=layerGroups.filter(g=>g.id!==gid);
+  renderLayers();
+  saveHistory();
+}
+
+function toggleGroupVisibility(gid){
+  const g=layerGroups.find(gr=>gr.id===gid);if(!g)return;
+  g.visible=!g.visible;
+  updateDisplay();renderLayers();saveHistory();
+}
+
+function toggleGroupExpanded(gid){
+  const g=layerGroups.find(gr=>gr.id===gid);if(!g)return;
+  g.expanded=!g.expanded;
+  renderLayers();
+}
+
+function addActiveLayerToGroup(gid){
+  const layer=getActiveLayer();
+  const g=layerGroups.find(gr=>gr.id===gid);
+  if(!layer||!g||layer.group===gid)return;
+  // Keep group members contiguous: insert just above the group's topmost member.
+  layers=layers.filter(l=>l.id!==layer.id);
+  const memberIdx=layers.map((l,i)=>l.group===gid?i:-1).filter(i=>i>=0);
+  const insertAt=memberIdx.length?Math.max(...memberIdx)+1:layers.length;
+  layers.splice(insertAt,0,layer);
+  layer.group=gid;
+  renderLayers();updateDisplay();saveHistory();
+}
+
+function ungroupLayer(id){
+  const l=layers.find(x=>x.id===id);if(!l)return;
+  l.group=null;
+  pruneEmptyGroups();
+  renderLayers();saveHistory();
+}
+
+// ---- LAYER MERGE ----
+function mergeLayerDown(){
+  if(transformSession){alert('Apply or cancel the active transform before merging layers.');return;}
+  if(textSession)commitTextSession();
+  if(selection&&selection.floating)commitMoveSelection();
+  const idx=layers.findIndex(l=>l.id===activeLayerId);
+  if(idx<=0){alert('There is no layer below to merge into.');return;}
+  const upper=layers[idx],lower=layers[idx-1];
+  if(upper.locked||lower.locked){alert('One of the layers is locked. Unlock both layers before merging.');return;}
+  lower.ctx.save();
+  lower.ctx.globalAlpha=upper.opacity;
+  lower.ctx.globalCompositeOperation=upper.blend;
+  lower.ctx.drawImage(upper.canvas,upper.offsetX-lower.offsetX,upper.offsetY-lower.offsetY);
+  lower.ctx.restore();
+  layers.splice(idx,1);
+  activeLayerId=lower.id;
+  pruneEmptyGroups();
+  renderLayers();updateDisplay();saveHistory();
+  statusBar.textContent='Merged '+upper.name+' down into '+lower.name+'.';
+}
+
+function mergeVisibleLayers(){
+  if(transformSession){alert('Apply or cancel the active transform before merging layers.');return;}
+  if(textSession)commitTextSession();
+  if(selection&&selection.floating)commitMoveSelection();
+  if(layers.some(l=>l.locked&&isLayerEffectivelyVisible(l))){alert('A visible layer is locked. Unlock it before merging visible layers.');return;}
+  const visible=layers.filter(l=>isLayerEffectivelyVisible(l));
+  if(visible.length<2){alert('At least two visible layers are needed to merge.');return;}
+  const target=visible[0]; // bottommost visible layer receives the composite
+  const merged=document.createElement('canvas');merged.width=W;merged.height=H;
+  const mctx=merged.getContext('2d');
+  visible.forEach(l=>{
+    mctx.save();
+    mctx.globalAlpha=l.opacity;
+    mctx.globalCompositeOperation=l.blend;
+    mctx.drawImage(l.canvas,l.offsetX,l.offsetY);
+    mctx.restore();
+  });
+  target.ctx.clearRect(0,0,W,H);
+  target.ctx.drawImage(merged,0,0);
+  target.offsetX=0;target.offsetY=0;target.opacity=1;target.blend='source-over';
+  layers=layers.filter(l=>!visible.includes(l)||l===target);
+  activeLayerId=target.id;
+  pruneEmptyGroups();
+  renderLayers();updateDisplay();saveHistory();
+  statusBar.textContent='Merged '+visible.length+' visible layers into '+target.name+'.';
+}
 
 // ============================================================
-// HISTORY (200 steps)
+// HISTORY (200 steps, with a memory safety budget for large canvases)
 // ============================================================
 function saveHistory(){
   if(historyIndex<history.length-1)history=history.slice(0,historyIndex+1);
   const state={
-    layers:layers.map(l=>({id:l.id,imageData:l.ctx.getImageData(0,0,W,H),visible:l.visible,opacity:l.opacity,blend:l.blend,offsetX:l.offsetX,offsetY:l.offsetY})),
+    layers:layers.map(l=>({id:l.id,imageData:l.ctx.getImageData(0,0,W,H),visible:l.visible,opacity:l.opacity,blend:l.blend,locked:l.locked,group:l.group||null,offsetX:l.offsetX,offsetY:l.offsetY})),
+    groups:layerGroups.map(g=>({...g})),
     activeLayerId, W, H, BG
   };
+  state._bytes=W*H*4*layers.length;
   history.push(state);
-  if(history.length>HISTORY_LIMIT){
+  historyIndex=history.length-1;
+  historyBytes=history.reduce((sum,s)=>sum+(s._bytes||0),0);
+  let dropped=false;
+  while(history.length>1&&(history.length>HISTORY_LIMIT||historyBytes>HISTORY_BYTE_BUDGET)){
+    historyBytes-=history[0]._bytes||0;
     history.shift();
-    if(!historyLimitNotified){
-      historyLimitNotified=true;
-      setTimeout(()=>alert('History limit reached (200 steps). Please save or export your work now; continuing will discard the oldest history steps.'),0);
-    }
-  }else{
-    historyIndex++;
+    historyIndex--;
+    dropped=true;
+  }
+  if(dropped&&!historyLimitNotified){
+    historyLimitNotified=true;
+    setTimeout(()=>alert('History limit reached (200 steps or the memory budget). Please save or export your work now; continuing will discard the oldest history steps.'),0);
   }
 }
 
@@ -672,10 +880,12 @@ function redo(){
 }
 
 function restoreHistory(s){
+  layerGroups=(s.groups||[]).map(g=>({...g}));
   layers.forEach(l=>{
     const saved=s.layers.find(x=>x.id===l.id);
-    if(saved){l.ctx.putImageData(saved.imageData,0,0);l.visible=saved.visible;l.opacity=saved.opacity;l.blend=saved.blend;l.offsetX=saved.offsetX||0;l.offsetY=saved.offsetY||0;}
+    if(saved){l.ctx.putImageData(saved.imageData,0,0);l.visible=saved.visible;l.opacity=saved.opacity;l.blend=saved.blend;l.locked=saved.locked||false;l.group=saved.group||null;l.offsetX=saved.offsetX||0;l.offsetY=saved.offsetY||0;}
   });
+  pruneEmptyGroups();
   activeLayerId=s.activeLayerId;
   if(s.W!==W||s.H!==H){W=s.W;H=s.H;resizeCanvases(W,H);}
   BG=s.BG;
@@ -704,7 +914,7 @@ function requestRedraw(){
     displayCtx.fillStyle=BG;
     displayCtx.fillRect(0,0,displayCanvas.width,displayCanvas.height);
     layers.forEach(l=>{
-        if(!l.visible)return;
+        if(!isLayerEffectivelyVisible(l))return;
         displayCtx.save();
         displayCtx.globalAlpha=l.opacity;
         displayCtx.globalCompositeOperation=l.blend;
@@ -918,7 +1128,7 @@ function sampleCanvasColor(p){
   const cctx=c.getContext('2d',{willReadFrequently:true});
   cctx.fillStyle=BG;cctx.fillRect(0,0,1,1); // transparent areas pick the paper color
   layers.forEach(l=>{
-    if(!l.visible)return;
+    if(!isLayerEffectivelyVisible(l))return;
     cctx.save();
     cctx.globalAlpha=l.opacity;
     cctx.globalCompositeOperation=l.blend;
@@ -1199,7 +1409,8 @@ function pasteCanvasAsLayer(canvas,x=0,y=0,name='Pasted Layer'){
     blend:'source-over',
     locked:false,
     offsetX:0,
-    offsetY:0
+    offsetY:0,
+    group:null
   };
   layers.push(layer);
   activeLayerId=layer.id;
@@ -1731,7 +1942,7 @@ function wireToolbar(){
   document.getElementById('btn-redo').onclick=()=>{if(!transformSession&&!textSession&&!(selection&&selection.floating))redo();};
   document.getElementById('btn-zoom-out').onclick=()=>{zoom=Math.max(0.1,zoom*0.9);updateDisplay();};
   document.getElementById('btn-zoom-in').onclick=()=>{zoom=Math.min(5,zoom*1.1);updateDisplay();};
-  document.getElementById('btn-reset-view').onclick=()=>{zoom=1;panX=0;panY=0;updateDisplay();};
+  document.getElementById('btn-reset-view').onclick=fitCanvasToView;
   document.getElementById('btn-canvas-size').onclick=()=>{
     if(transformSession)cancelTransform();
     if(textSession)commitTextSession();
@@ -1741,7 +1952,11 @@ function wireToolbar(){
     document.getElementById('new-bg-text').value=BG;
     document.getElementById('canvas-dialog').style.display='flex';
   };
-  document.getElementById('btn-clear').onclick=()=>{if(confirm('Clear all layers?')){if(transformSession)transformSession=null;textSession=null;textDrag=null;selection=null;internalClipboard=null;hideTransformBar();layers.forEach(l=>{l.ctx.clearRect(0,0,W,H);l.offsetX=0;l.offsetY=0;});updateDisplay();renderLayers();saveHistory();}};
+  document.getElementById('btn-clear').onclick=()=>{
+    const lockedCount=layers.filter(l=>l.locked).length;
+    const msg=lockedCount?('Clear all layers? '+lockedCount+' locked layer(s) will be preserved.'):'Clear all layers?';
+    if(confirm(msg)){if(transformSession)transformSession=null;textSession=null;textDrag=null;selection=null;internalClipboard=null;hideTransformBar();layers.forEach(l=>{if(l.locked)return;l.ctx.clearRect(0,0,W,H);l.offsetX=0;l.offsetY=0;});updateDisplay();renderLayers();saveHistory();}
+  };
   document.getElementById('btn-copy').onclick=()=>copySelectionOrLayer(true);
   document.getElementById('btn-paste').onclick=pasteClipboard;
   document.getElementById('btn-export').onclick=exportPNG;
@@ -1750,6 +1965,11 @@ function wireToolbar(){
   document.getElementById('btn-add-layer').onclick=()=>{leaveTransientMode();addLayer('Layer '+(layers.length+1));};
   document.getElementById('btn-duplicate-layer').onclick=()=>{leaveTransientMode();duplicateLayer(activeLayerId);};
   document.getElementById('btn-del-layer').onclick=()=>{leaveTransientMode();deleteLayer(activeLayerId);};
+  document.getElementById('btn-merge-down').onclick=()=>{leaveTransientMode();mergeLayerDown();};
+  document.getElementById('btn-merge-visible').onclick=()=>{leaveTransientMode();mergeVisibleLayers();};
+  document.getElementById('btn-new-group').onclick=()=>{leaveTransientMode();createLayerGroup();};
+  document.getElementById('btn-toggle-left-panel').onclick=()=>{const el=document.getElementById('left-panel');setPanelVisible('left',el.style.display==='none');};
+  document.getElementById('btn-toggle-right-panel').onclick=()=>{const el=document.getElementById('right-panels');setPanelVisible('right',el.style.display==='none');};
 
   // Transform menu: fixed positioning avoids clipping by the scrollable toolbar.
   const dropdown=document.getElementById('transform-dropdown');
@@ -2908,7 +3128,7 @@ function composeMergedCanvas(){
   const c=document.createElement('canvas');c.width=W;c.height=H;
   const ctx=c.getContext('2d');
   layers.forEach(l=>{
-    if(!l.visible)return;
+    if(!isLayerEffectivelyVisible(l))return;
     ctx.save();
     ctx.globalAlpha=l.opacity;
     ctx.globalCompositeOperation=l.blend;
@@ -3035,7 +3255,7 @@ function psdLayerPackage(layer){
   channelIds.forEach((id,index)=>recordParts.push(i16be(id),u32be(channelData[index].length)));
   recordParts.push(
     asciiBytes('8BIM'),asciiBytes(psdBlendKey(layer.blend)),
-    new Uint8Array([Math.round(clamp(layer.opacity,0,1)*255),0,layer.visible?8:10,0]),
+    new Uint8Array([Math.round(clamp(layer.opacity,0,1)*255),0,isLayerEffectivelyVisible(layer)?8:10,0]),
     u32be(extra.length),extra
   );
   return{record:concatBytes(recordParts),channelData:concatBytes(channelData)};
@@ -3315,7 +3535,8 @@ function loadPsdDocument(documentData){
       blend:BLEND_MODES.some(m=>m.val===record.blend)?record.blend:'source-over',
       locked:false,
       offsetX:0,
-      offsetY:0
+      offsetY:0,
+      group:null
     };
   });
 
@@ -3327,9 +3548,10 @@ function loadPsdDocument(documentData){
     const layer=addLayer('Background',true);
     activeLayerId=layer.id;
   }
+  layerGroups=[];
   activeTool='brush';
   wrap.style.cursor='crosshair';
-  history=[];historyIndex=-1;
+  history=[];historyIndex=-1;historyBytes=0;
   renderLayers();
   updateDisplay();
   updateToolButtons();
@@ -3443,7 +3665,7 @@ async function exportORA(){
     }
     const fileName='data/layer'+String(index).padStart(3,'0')+'.png';
     entries.push({name:fileName,data:canvasToPngBytes(pngCanvas,true)});
-    layerXml.push('      <layer name="'+xmlEscape(layer.name)+'" src="'+fileName+'" x="'+x+'" y="'+y+'" opacity="'+Number(layer.opacity).toFixed(3)+'" visibility="'+(layer.visible?'visible':'hidden')+'" composite-op="'+oraCompositeOp(layer.blend)+'"/>');
+    layerXml.push('      <layer name="'+xmlEscape(layer.name)+'" src="'+fileName+'" x="'+x+'" y="'+y+'" opacity="'+Number(layer.opacity).toFixed(3)+'" visibility="'+(isLayerEffectivelyVisible(layer)?'visible':'hidden')+'" composite-op="'+oraCompositeOp(layer.blend)+'"/>');
   });
 
   const merged=composeMergedCanvas();
