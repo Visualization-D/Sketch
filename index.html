@@ -322,6 +322,16 @@ button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visi
             <p class="help-text">Dynamics are evaluated per stamp and work with pressure-sensitive pens.</p>
           </div>
         </details>
+        <details class="advanced-section" open>
+          <summary>Line &amp; Curve Fidelity</summary>
+          <div class="panel-row">
+            <label>Curve Fidelity <span class="value-label" id="line-fidelity-val">70%</span></label>
+            <input type="range" id="line-fidelity-slider" min="0" max="100" value="70">
+            <label style="margin-top:7px">Stroke Smoothness <span class="value-label" id="line-smoothness-val">55%</span></label>
+            <input type="range" id="line-smoothness-slider" min="0" max="100" value="55">
+            <p class="help-text">For pens and pencils: higher fidelity follows tight curves more closely; higher smoothness stabilizes jagged input. Hold Shift while drawing for a straight line.</p>
+          </div>
+        </details>
         <div class="panel-row" id="text-props" style="display:none;border-top:1px solid #333;padding-top:10px">
           <label style="font-weight:600;color:#ddd">Text — Titles &amp; Headlines</label>
           <label style="margin-top:6px">Content</label>
@@ -636,7 +646,8 @@ let activeBrushId='pen';
 let activeBrushCat='basic';
 let lastBrushId='pen';
 let lastBrushCat='basic';
-let brushSettings={size:5,opacity:1,color:'#000000',blend:'source-over',spacing:0.1,jitter:0,hardness:1,flow:0.5,usePressure:true,minSize:0.15,minOp:0.2,tipShape:'round',roundness:1,angle:0,grain:0,grainScale:2,flipX:false,flipY:false,behavior:'normal',mixerLoad:0.7,mixerMix:0.65,mixerWet:0.45,waterWet:0.65,waterBleed:0.45,waterEdge:0.55,waterGran:0.3,waterDry:0.25,sizeJitter:0,opacityJitter:0,angleJitter:0,scatter:0,textureScale:1};
+let lastBrushSettings=null;
+let brushSettings={size:5,opacity:1,color:'#000000',blend:'source-over',spacing:0.1,jitter:0,hardness:1,flow:0.5,usePressure:true,minSize:0.15,minOp:0.2,tipShape:'round',roundness:1,angle:0,grain:0,grainScale:2,flipX:false,flipY:false,behavior:'normal',mixerLoad:0.7,mixerMix:0.65,mixerWet:0.45,waterWet:0.65,waterBleed:0.45,waterEdge:0.55,waterGran:0.3,waterDry:0.25,sizeJitter:0,opacityJitter:0,angleJitter:0,scatter:0,textureScale:1,lineFidelity:.7,lineSmoothness:.55};
 let activeLayerId='layer-1';
 let layers=[];
 let layerGroups=[]; // {id,name,visible,expanded}; layers carry .group (group id) or null
@@ -673,6 +684,8 @@ let lastPoint=null, points=[];
 let smoothPos=null, prevSmoothPos=null, velocity=0, prevWidth=0;
 let isFirstPoint=true;
 let smudgeSnapshot=null;
+let smudgeBrushId='pen',smudgeBrushSettings=null;
+let strokeStartSnapshot=null,strokeStartPoint=null,straightStroke=null;
 let mixerPaintRemaining=1;
 let strokeStampAngle=0;
 let lastMidPoint=null; // replaces window._lastMid
@@ -1186,7 +1199,7 @@ function requestRedraw(){
     if(textSession)drawTextPreview(displayCtx,textSession);
 
     container.style.transform=`translate(${panX}px,${panY}px) scale(${zoom})`;
-    const modeText=transformSession?` | ${transformSession.mode.toUpperCase()}`:(textSession?' | TEXT':'');
+    const modeText=transformSession?` | ${transformSession.mode.toUpperCase()}`:(textSession?' | TEXT':(straightStroke?' | STRAIGHT':''));
     statusBar.textContent=`${Math.round(zoom*100)}% | ${W}×${H}${modeText}`;
 }
 
@@ -1242,9 +1255,10 @@ function wireEvents(){
     const layer=getActiveLayer();if(!layer||layer.locked)return;
     selection=null;
     isDrawing=true;points=[p];
+    strokeStartSnapshot=cloneCanvas(layer.canvas);strokeStartPoint={...p};
     startStroke(p);
-    const brush=getBrushDef();
-    strokeTo(p,brush.id,e.pressure||1);
+    if(e.shiftKey){straightStroke={start:{...p},snapshot:strokeStartSnapshot,layerId:layer.id};renderStraightStroke(p,e.pressure||1);}
+    else{const brush=getBrushDef();strokeTo(p,brush.id,e.pressure||1);}
     requestRedraw();
   });
 
@@ -1283,6 +1297,10 @@ function wireEvents(){
     }
 
     if(!isDrawing)return;
+    if(e.shiftKey||straightStroke){
+      if(!straightStroke)straightStroke={start:{...strokeStartPoint},snapshot:strokeStartSnapshot,layerId:activeLayerId};
+      renderStraightStroke(p,e.pressure||1);requestRedraw();return;
+    }
     const brush=getBrushDef();
     strokeTo(p,brush.id,e.pressure||1);
     points.push(p);
@@ -1353,7 +1371,7 @@ function wireEvents(){
     if(key==='t'){document.getElementById('tool-text').click();return;}
     if(key==='s'){document.getElementById('tool-smudge').click();return;}
     if(e.key==='['||e.key===']'){
-      e.preventDefault();const slider=document.getElementById('size-slider');slider.value=clamp(parseInt(slider.value)+(e.key===']'?1:-1)*(brushSettings.size>20?5:1),1,200);slider.dispatchEvent(new Event('input'));
+      e.preventDefault();const slider=document.getElementById('size-slider');slider.value=clamp(parseInt(slider.value)+(e.key===']'?1:-1)*(brushSettings.size>20?5:1),1,Number(slider.max)||200);slider.dispatchEvent(new Event('input'));
     }
   });
   window.addEventListener('keyup',e=>{
@@ -1762,7 +1780,16 @@ function getBrushDef(){
   return b;
 }
 
+function captureSmudgeBrush(){
+  const useActive=!['eraser','smudge','blur'].includes(activeBrushId);
+  smudgeBrushId=useActive?activeBrushId:lastBrushId;
+  const source=[...PRESET_BRUSHES.basic,...PRESET_BRUSHES.harmony,...customBrushes].find(b=>b.id===smudgeBrushId);
+  smudgeBrushSettings=useActive?{...brushSettings}:{...brushSettings,...(source||{}),...(lastBrushSettings||{})};
+  smudgeMaskCache.key='';
+}
+
 function startStroke(point){
+  if(smudgeMode&&!smudgeBrushSettings)captureSmudgeBrush();
   lastPoint=point;smoothPos={...point};prevSmoothPos={...point};velocity=0;
   prevWidth=applyPressure(brushSettings.size,point.pressure||1);isFirstPoint=true;
   lastMidPoint=null;points=[point];strokeCount=0;mixerPaintRemaining=1;strokeStampAngle=0;sketchyMaxDist=20+(brushSettings.size/200)*830;
@@ -1777,6 +1804,23 @@ function startStroke(point){
 function finishStroke(){
   lastPoint=null;smoothPos=null;prevSmoothPos=null;velocity=0;prevWidth=0;
   isFirstPoint=true;smudgeSnapshot=null;lastMidPoint=null;
+  strokeStartSnapshot=null;strokeStartPoint=null;straightStroke=null;
+}
+
+function renderStraightStroke(point,pressure=1){
+  if(!straightStroke||!straightStroke.snapshot)return;
+  const layer=layers.find(l=>l.id===straightStroke.layerId)||getActiveLayer();if(!layer)return;
+  layer.ctx.clearRect(0,0,W,H);layer.ctx.drawImage(straightStroke.snapshot,0,0);
+  const start=straightStroke.start,brush=getBrushDef(),bs=brushSettings;
+  startStroke(start);
+  const size=applyPressure(bs.size,pressure,bs.usePressure,bs.minSize),opacity=applyPressure(bs.opacity,pressure,bs.usePressure,bs.minOp);
+  const distance=dist(start,point),spacing=Math.max(.5,size*Math.max(.02,bs.spacing||.1)),steps=Math.max(1,Math.ceil(distance/spacing));
+  for(let i=0;i<=steps;i++){
+    const t=i/steps,p={x:lerp(start.x,point.x,t),y:lerp(start.y,point.y,t),pressure};
+    points.push(p);
+    if(smudgeMode)stampSmudge(layer.ctx,p,size,opacity);else drawBrushPoint(layer.ctx,p,brush.id,pressure);
+  }
+  lastPoint={...point};
 }
 
 function strokeTo(point,brushType,pressure){
@@ -1825,33 +1869,33 @@ function drawSmoothLine(ctx,rawPoint,brushType,pressure){
 
   if(!smoothPos){smoothPos={...rawPoint};prevSmoothPos={...rawPoint};prevWidth=pSize;return;}
 
+  const fidelity=bs.lineFidelity??.7,smoothness=bs.lineSmoothness??.55;
   prevSmoothPos={...smoothPos};
-  smoothPos.x=lerp(smoothPos.x,rawPoint.x,0.25);
-  smoothPos.y=lerp(smoothPos.y,rawPoint.y,0.25);
+  const follow=clamp(lerp(.72,.1,smoothness)*lerp(.8,1.2,fidelity),.06,.9);
+  smoothPos.x=lerp(smoothPos.x,rawPoint.x,follow);
+  smoothPos.y=lerp(smoothPos.y,rawPoint.y,follow);
   const prevS=prevSmoothPos;
-  const dx=smoothPos.x-prevS.x,dy=smoothPos.y-prevS.y;
-  const segLen=Math.sqrt(dx*dx+dy*dy);
-  velocity=lerp(velocity,segLen,0.3);
+  const segLen=dist(prevS,smoothPos);
+  velocity=lerp(velocity,segLen,lerp(.45,.18,smoothness));
   const veloFactor=Math.max(0.25,1-velocity*0.015);
   const targetWidth=pSize*veloFactor;
-  const width=lerp(prevWidth,targetWidth,0.55);
+  const width=lerp(prevWidth,targetWidth,lerp(.75,.38,smoothness));
   prevWidth=width;
 
-  const midX=(prevS.x+smoothPos.x)/2;
-  const midY=(prevS.y+smoothPos.y)/2;
-
-  // Stamp brush tips along the smoothed segment — respects tip shape, grain, angle
-  const segD=Math.sqrt((smoothPos.x-prevS.x)**2+(smoothPos.y-prevS.y)**2);
-  const step=Math.max(0.5,width*(isPencil?0.15:0.12));
-  const n=Math.max(1,Math.floor(segD/step));
+  // Midpoint quadratic segments preserve curvature without polygonal corners.
+  const start=lastMidPoint||{...prevS},control=prevS,end={x:(prevS.x+smoothPos.x)/2,y:(prevS.y+smoothPos.y)/2};
+  const curveLength=dist(start,control)+dist(control,end);
+  const step=Math.max(.35,width*lerp(.2,.045,fidelity));
+  const n=clamp(Math.ceil(curveLength/step),1,600);
   const rawP=Math.max(0.05,Math.min(1,rawPoint.pressure||1));
   const darkness=bs.usePressure?lerp(0.3,1,rawP):0.85;
+  const inputNoise=(1-smoothness)*(isPencil?.5:.12);
   ctx.save();
   ctx.globalCompositeOperation=bs.blend;
   for(let i=1;i<=n;i++){
-    const t=i/n;
-    const px=lerp(prevS.x,smoothPos.x,t)+rand(-0.3,0.3);
-    const py=lerp(prevS.y,smoothPos.y,t)+rand(-0.3,0.3);
+    const t=i/n,u=1-t;
+    const px=u*u*start.x+2*u*t*control.x+t*t*end.x+rand(-inputNoise,inputNoise);
+    const py=u*u*start.y+2*u*t*control.y+t*t*end.y+rand(-inputNoise,inputNoise);
     const jitterSize=1+rand(-(bs.sizeJitter||0),(bs.sizeJitter||0));
     const w=width*(isPencil?(0.9+Math.random()*0.2):1)*Math.max(.05,jitterSize);
     const op=pOpacity*(isPencil?darkness*(0.85+Math.random()*0.15):1)*(1+rand(-(bs.opacityJitter||0),(bs.opacityJitter||0)));
@@ -1860,7 +1904,7 @@ function drawSmoothLine(ctx,rawPoint,brushType,pressure){
   }
   ctx.restore();
 
-  lastMidPoint={x:midX,y:midY};
+  lastMidPoint=end;
   isFirstPoint=false;
 }
 
@@ -1868,8 +1912,8 @@ function drawSmoothLine(ctx,rawPoint,brushType,pressure){
 // BRUSH TIP ENGINE — shape + texture stamps
 // ============================================================
 const tipCacheMap=new Map();
-function getBrushTip(size,color=brushSettings.color){
-  const bs=brushSettings;
+function getBrushTip(size,color=brushSettings.color,settings=brushSettings){
+  const bs=settings;
   const qSize=Math.max(1,Math.round(size));
   const effectiveAngle=(bs.angle||0)+strokeStampAngle;
   const key=[qSize,bs.tipShape,bs.roundness,effectiveAngle,bs.hardness,bs.grain,bs.grainScale,color].join('|');
@@ -1933,7 +1977,8 @@ function getBrushTip(size,color=brushSettings.color){
 // brushes contribute their generated tip (shape, roundness, angle, hardness, grain).
 const smudgeMaskCache={key:'',mask:null};
 function getSmudgeMask(size){
-  const b=customBrushes.find(cb=>cb.id===activeBrushId);
+  const sourceId=smudgeBrushSettings?smudgeBrushId:activeBrushId;
+  const b=customBrushes.find(cb=>cb.id===sourceId);
   if(b){
     const src=b.mask||(b.canvas&&b.canvas.width?b.canvas:(b.img&&b.img.complete&&b.img.naturalWidth>0?b.img:null));
     if(src){
@@ -1949,7 +1994,8 @@ function getSmudgeMask(size){
       return c;
     }
   }
-  return getBrushTip(size);
+  const settings=smudgeBrushSettings||brushSettings;
+  return getBrushTip(size,settings.color,settings);
 }
 
 function stampTip(ctx,x,y,size,opacity,color=brushSettings.color){
@@ -2261,6 +2307,7 @@ function wireToolbar(){
   document.getElementById('tool-text').onclick=()=>{leaveTransientMode();activeTool='text';wrap.style.cursor='text';updateToolButtons();requestRedraw();};
   document.getElementById('tool-smudge').onclick=()=>{
     smudgeMode=!smudgeMode;
+    if(smudgeMode)captureSmudgeBrush();else smudgeBrushSettings=null;
     document.getElementById('tool-smudge').classList.toggle('active',smudgeMode);
     document.getElementById('tool-smudge').textContent=smudgeMode?'👆 Smudge ON':'👆 Smudge';
   };
@@ -2354,6 +2401,7 @@ function wireProperties(){
   bind('mixer-load-slider','mixerLoad',true);bind('mixer-mix-slider','mixerMix',true);bind('mixer-wet-slider','mixerWet',true);
   bind('water-wet-slider','waterWet',true);bind('water-bleed-slider','waterBleed',true);bind('water-edge-slider','waterEdge',true);bind('water-gran-slider','waterGran',true);bind('water-dry-slider','waterDry',true);
   bind('size-jitter-slider','sizeJitter',true);bind('opacity-jitter-slider','opacityJitter',true);bind('scatter-slider','scatter',true);bind('texture-scale-slider','textureScale',true);
+  bind('line-fidelity-slider','lineFidelity',true);bind('line-smoothness-slider','lineSmoothness',true);
   document.getElementById('angle-jitter-slider').oninput=e=>{brushSettings.angleJitter=parseInt(e.target.value);document.getElementById('angle-jitter-val').textContent=e.target.value+'°';};
   document.getElementById('flip-x').onchange=e=>{brushSettings.flipX=e.target.checked;};
   document.getElementById('flip-y').onchange=e=>{brushSettings.flipY=e.target.checked;};
@@ -2381,7 +2429,7 @@ function syncBehaviorUI(){
 
 function syncAdvancedBrushUI(){
   const pct=(id,value)=>{const el=document.getElementById(id+'-slider');const out=document.getElementById(id+'-val');el.value=Math.round(value*100);out.textContent=Math.round(value*100)+'%';};
-  ['mixer-load','mixer-mix','mixer-wet','water-wet','water-bleed','water-edge','water-gran','water-dry','size-jitter','opacity-jitter','scatter','texture-scale'].forEach(id=>{const key={'mixer-load':'mixerLoad','mixer-mix':'mixerMix','mixer-wet':'mixerWet','water-wet':'waterWet','water-bleed':'waterBleed','water-edge':'waterEdge','water-gran':'waterGran','water-dry':'waterDry','size-jitter':'sizeJitter','opacity-jitter':'opacityJitter','scatter':'scatter','texture-scale':'textureScale'}[id];pct(id,brushSettings[key]);});
+  ['mixer-load','mixer-mix','mixer-wet','water-wet','water-bleed','water-edge','water-gran','water-dry','size-jitter','opacity-jitter','scatter','texture-scale','line-fidelity','line-smoothness'].forEach(id=>{const key={'mixer-load':'mixerLoad','mixer-mix':'mixerMix','mixer-wet':'mixerWet','water-wet':'waterWet','water-bleed':'waterBleed','water-edge':'waterEdge','water-gran':'waterGran','water-dry':'waterDry','size-jitter':'sizeJitter','opacity-jitter':'opacityJitter','scatter':'scatter','texture-scale':'textureScale','line-fidelity':'lineFidelity','line-smoothness':'lineSmoothness'}[id];pct(id,brushSettings[key]);});
   document.getElementById('brush-behavior').value=brushSettings.behavior;
   document.getElementById('angle-jitter-slider').value=brushSettings.angleJitter;document.getElementById('angle-jitter-val').textContent=brushSettings.angleJitter+'°';
   document.getElementById('flip-x').checked=brushSettings.flipX;document.getElementById('flip-y').checked=brushSettings.flipY;
@@ -2419,21 +2467,7 @@ function getCanvasBrushSource(){
   let tip=cropCanvas(raw,alphaBox);
   tip._hasTransparentMargin=transparentSource||alphaBox.x>0||alphaBox.y>0||alphaBox.w<raw.width||alphaBox.h<raw.height;
 
-  // Keep brush stamps responsive without flattening their silhouette or aspect ratio.
-  const maxTipSize=256;
-  const maxDim=Math.max(tip.width,tip.height);
-  if(maxDim>maxTipSize){
-    const scale=maxTipSize/maxDim;
-    const scaled=document.createElement('canvas');
-    scaled.width=Math.max(1,Math.round(tip.width*scale));
-    scaled.height=Math.max(1,Math.round(tip.height*scale));
-    scaled._hasTransparentMargin=tip._hasTransparentMargin;
-    const sctx=scaled.getContext('2d');
-    sctx.imageSmoothingEnabled=true;
-    sctx.imageSmoothingQuality='high';
-    sctx.drawImage(tip,0,0,scaled.width,scaled.height);
-    tip=scaled;
-  }
+  // Canvas-created brushes retain every source pixel: native size is the 1:1 maximum.
   return tip;
 }
 
@@ -2532,6 +2566,7 @@ function createBrushFromCanvas(){
     mask=cropCanvas(mask,maskBox);
     mask._backgroundRemoved=true;
   }
+  const nativeSize=Math.max(1,Math.max(mask.width,mask.height));
   const count=customBrushes.filter(b=>b.id.startsWith('canvas-brush-')).length+1;
   const brush={
     id:'canvas-brush-'+Date.now()+'-'+Math.random().toString(36).slice(2,6),
@@ -2540,7 +2575,8 @@ function createBrushFromCanvas(){
     mask,
     width:mask.width,
     height:mask.height,
-    size:Math.min(120,Math.max(12,Math.max(mask.width,mask.height))),
+    size:nativeSize,
+    nativeSize,
     opacity:1,
     spacing:0.32,
     hardness:1,
@@ -2706,6 +2742,8 @@ function renderBrushes(cat){
 function selectBrush(id,cat){
   activeBrushId=id;activeBrushCat=cat;
   const b=[...PRESET_BRUSHES.basic,...PRESET_BRUSHES.harmony,...customBrushes].find(x=>x.id===id);
+  const isPaintBrush=!!b&&!['eraser','smudge','blur'].includes(id);
+  if(isPaintBrush){lastBrushId=id;lastBrushCat=cat;}
   if(b){
     brushSettings.size=b.size??5;
     brushSettings.opacity=b.opacity??1;
@@ -2725,8 +2763,11 @@ function selectBrush(id,cat){
     brushSettings.mixerLoad=b.mixerLoad??.7;brushSettings.mixerMix=b.mixerMix??.65;brushSettings.mixerWet=b.mixerWet??.45;
     brushSettings.waterWet=b.waterWet??.65;brushSettings.waterBleed=b.waterBleed??.45;brushSettings.waterEdge=b.waterEdge??.55;brushSettings.waterGran=b.waterGran??.3;brushSettings.waterDry=b.waterDry??.25;
     brushSettings.sizeJitter=b.sizeJitter||0;brushSettings.opacityJitter=b.opacityJitter||0;brushSettings.angleJitter=b.angleJitter||0;brushSettings.scatter=b.scatter||0;brushSettings.textureScale=b.textureScale||1;
-    // Sync UI
-    document.getElementById('size-slider').value=brushSettings.size;
+    brushSettings.lineFidelity=b.lineFidelity??.7;brushSettings.lineSmoothness=b.lineSmoothness??.55;
+    // Canvas-created brushes can reach their exact native pixel size; other brushes retain the standard range.
+    const sizeSlider=document.getElementById('size-slider');
+    sizeSlider.max=Math.max(1,Math.round(b.nativeSize||200));
+    sizeSlider.value=brushSettings.size;
     document.getElementById('size-val').textContent=brushSettings.size+'px';
     document.getElementById('opacity-slider').value=brushSettings.opacity*100;
     document.getElementById('opacity-val').textContent=Math.round(brushSettings.opacity*100)+'%';
@@ -2752,6 +2793,8 @@ function selectBrush(id,cat){
     document.getElementById('grain-scale-slider').value=brushSettings.grainScale;
     document.getElementById('grain-scale-val').textContent=brushSettings.grainScale+'px';
     syncAdvancedBrushUI();
+    if(isPaintBrush)lastBrushSettings={...brushSettings};
+    if(smudgeMode&&isPaintBrush)captureSmudgeBrush();
   }
   renderBrushes(cat);
 }
