@@ -147,6 +147,13 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
 .modal-row input[type="range"]{flex:1}
 .modal-section{border-top:1px solid #3a3a3a;margin-top:14px;padding-top:12px}
 .modal-section h4{font-size:12px;color:#ddd;margin-bottom:10px}
+.perspective-actions{display:flex;gap:8px;margin:4px 0 10px}
+.perspective-actions button,.perspective-point-row button{padding:5px 9px;background:#333;border:1px solid #4a4a4a;color:#ddd;border-radius:3px;font-size:11px;cursor:pointer}
+.perspective-actions button:hover,.perspective-point-row button:hover{background:#444}
+.perspective-point-row{display:grid;grid-template-columns:42px 1fr 1fr 30px;gap:6px;align-items:center;margin-bottom:6px}
+.perspective-point-row span{font-size:11px;color:#bbb}
+.perspective-point-row input{width:100%;min-width:0;padding:4px 6px;background:#333;border:1px solid #444;color:#ddd;border-radius:3px;font-size:11px}
+.perspective-point-row button{padding:4px 0;color:#f0a5a5}
 .shortcut-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px 22px;font-size:12px}
 .shortcut-grid div{display:flex;justify-content:space-between;gap:10px;color:#bbb}
 kbd{font:11px ui-monospace,SFMono-Regular,Consolas,monospace;color:#eee;background:#383838;border:1px solid #555;border-bottom-width:2px;border-radius:3px;padding:2px 5px;white-space:nowrap}
@@ -187,6 +194,7 @@ button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visi
     <button id="btn-reset-view" title="Fit Canvas to View">⟲</button>
     <div class="sep"></div>
     <button id="btn-canvas-size" title="Canvas Size">📐 Canvas</button>
+    <button id="btn-perspective" class="tool-btn" title="Edit perspective guide (P): drag vanishing points or click empty canvas to add more">⊹ Perspective</button>
     <button id="btn-clear" title="Clear All">🗑️ Clear</button>
     <div class="sep"></div>
     <button id="btn-copy" title="Copy selection or layer (Ctrl+C)">📋 Copy</button>
@@ -463,7 +471,7 @@ button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visi
 <!-- ===== CANVAS / PAPER / GRID DIALOG ===== -->
 <div class="modal-overlay" id="canvas-dialog" style="display:none" role="dialog" aria-modal="true" aria-labelledby="canvas-dialog-title">
   <div class="modal wide">
-    <h3 id="canvas-dialog-title">Canvas, Paper &amp; Grid</h3>
+    <h3 id="canvas-dialog-title">Canvas, Paper &amp; Guides</h3>
     <div class="modal-row">
       <label>Canvas Type</label>
       <select id="canvas-preset">
@@ -535,6 +543,42 @@ button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visi
       </div>
       <p class="help-text">Paper texture and guides are visual working surfaces. They do not alter layer pixels or appear in transparent PNG exports.</p>
     </div>
+    <div class="modal-section">
+      <h4>Perspective Guide</h4>
+      <div class="modal-row">
+        <label for="perspective-enabled">Enable</label>
+        <input type="checkbox" id="perspective-enabled">
+        <span style="font-size:11px;color:#aaa">Radiating construction lines over the scene</span>
+      </div>
+      <div class="modal-row">
+        <label>Preset</label>
+        <select id="perspective-preset">
+          <option value="one">One-point perspective</option>
+          <option value="two">Two-point perspective</option>
+          <option value="three">Three-point perspective</option>
+          <option value="custom">Custom vanishing points</option>
+        </select>
+      </div>
+      <div class="modal-row">
+        <label>Rays / Point</label>
+        <input type="range" id="perspective-rays" min="4" max="72" step="1" value="24">
+        <span id="perspective-rays-val" style="min-width:30px;font-size:11px">24</span>
+      </div>
+      <div class="modal-row">
+        <label>Opacity</label>
+        <input type="range" id="perspective-opacity" min="5" max="100" value="35">
+        <span id="perspective-opacity-val" style="min-width:42px;font-size:11px">35%</span>
+      </div>
+      <div class="modal-row">
+        <label>Line Color</label>
+        <input type="color" id="perspective-color" value="#e11d48">
+      </div>
+      <div class="perspective-actions">
+        <button id="btn-add-vanishing-point" type="button">+ Add Vanishing Point</button>
+      </div>
+      <div id="perspective-point-list" aria-label="Vanishing point coordinates"></div>
+      <p class="help-text">X/Y coordinates use canvas pixels and may lie outside the canvas. After applying, choose <strong>Perspective</strong> or press <strong>P</strong>: drag a VP handle to move it, click empty canvas to add another, or press Delete to remove the selected VP.</p>
+    </div>
     <div class="modal-footer">
       <button class="btn-secondary" id="btn-cancel-canvas" type="button">Cancel</button>
       <button class="btn-primary" id="btn-apply-canvas" type="button">Apply</button>
@@ -556,6 +600,7 @@ button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visi
       <div><span>Move / Pan</span><span><kbd>V</kbd> <kbd>H</kbd></span></div>
       <div><span>Text / Smudge</span><span><kbd>T</kbd> <kbd>S</kbd></span></div>
       <div><span>Brush size</span><span><kbd>[</kbd> <kbd>]</kbd></span></div>
+      <div><span>Edit perspective guide</span><kbd>P</kbd></div>
       <div><span>Zoom / Fit</span><span><kbd>Ctrl +</kbd> <kbd>Ctrl −</kbd> <kbd>Ctrl 0</kbd></span></div>
       <div><span>Temporary pan</span><kbd>Space</kbd></div>
       <div><span>Full screen</span><kbd>F</kbd></div>
@@ -638,7 +683,8 @@ const APP_AUTHOR='Prof. Mohammad Lataifeh';
 const APP_CONTACT='lataifeh@gmail.com';
 
 let W=2100, H=2900, BG='#ffffff';
-let canvasSettings={surface:'solid',texture:'none',grid:'none',gridSize:50,gridOpacity:0.25,gridColor:'#64748b'};
+let canvasSettings={surface:'solid',texture:'none',grid:'none',gridSize:50,gridOpacity:0.25,gridColor:'#64748b',perspective:{enabled:false,preset:'one',rays:24,opacity:.35,color:'#e11d48',points:[]}};
+let perspectiveEditMode=false,perspectiveDrag=null,perspectiveSelectedId=null,perspectiveDraft=null,perspectivePointSeq=0;
 let paperTextureCache={key:'',canvas:null};
 let zoom=1, panX=0, panY=0;
 let activeTool='brush';
@@ -1025,6 +1071,24 @@ function mergeVisibleLayers(){
 }
 
 // ============================================================
+// PERSPECTIVE GUIDE STATE — independent, non-destructive overlay
+// ============================================================
+function createVanishingPoint(x,y){return{id:'vp-'+Date.now()+'-'+(++perspectivePointSeq),x,y};}
+function makePerspectivePoints(kind,w=W,h=H){
+  if(kind==='two')return[createVanishingPoint(w*.12,h*.42),createVanishingPoint(w*.88,h*.42)];
+  if(kind==='three')return[createVanishingPoint(w*.12,h*.38),createVanishingPoint(w*.88,h*.38),createVanishingPoint(w*.5,h*.9)];
+  return[createVanishingPoint(w*.5,h*.5)];
+}
+function clonePerspective(p={}){
+  return{
+    enabled:!!p.enabled,preset:p.preset||'one',
+    rays:clamp(parseInt(p.rays??24,10),4,72),
+    opacity:clamp(Number(p.opacity??.35),.05,1),color:p.color||'#e11d48',
+    points:Array.isArray(p.points)?p.points.map((v,i)=>({id:v.id||'vp-'+Date.now()+'-'+(++perspectivePointSeq),x:Number.isFinite(Number(v.x))?Number(v.x):W/2,y:Number.isFinite(Number(v.y))?Number(v.y):H/2})):[]};
+}
+function cloneCanvasSettings(settings){return{...settings,perspective:clonePerspective(settings.perspective)};}
+
+// ============================================================
 // HISTORY (300 recycled steps; oldest entries roll off silently)
 // ============================================================
 function saveHistory(){
@@ -1032,7 +1096,7 @@ function saveHistory(){
   const state={
     layers:layers.map(l=>({id:l.id,name:l.name,imageData:l.ctx.getImageData(0,0,W,H),visible:l.visible,opacity:l.opacity,blend:l.blend,locked:l.locked,group:l.group||null,offsetX:l.offsetX,offsetY:l.offsetY})),
     groups:layerGroups.map(g=>({...g})),
-    activeLayerId,W,H,BG,canvasSettings:{...canvasSettings}
+    activeLayerId,W,H,BG,canvasSettings:cloneCanvasSettings(canvasSettings)
   };
   history.push(state);
   historyIndex=history.length-1;
@@ -1059,7 +1123,8 @@ function redo(){
 
 function restoreHistory(s){
   W=s.W;H=s.H;BG=s.BG;
-  canvasSettings={...canvasSettings,...(s.canvasSettings||{})};
+  canvasSettings=cloneCanvasSettings({...canvasSettings,...(s.canvasSettings||{})});
+  perspectiveDrag=null;perspectiveSelectedId=null;
   displayCanvas.width=W;displayCanvas.height=H;
   displayCtx=displayCanvas.getContext('2d');
   layers=s.layers.map(saved=>{
@@ -1154,6 +1219,35 @@ function drawCanvasGrid(ctx){
   ctx.restore();
 }
 
+function drawPerspectiveGuide(ctx){
+  const guide=canvasSettings.perspective;
+  if(!guide||!guide.enabled||!guide.points.length)return;
+  ctx.save();
+  ctx.strokeStyle=guide.color;ctx.fillStyle=guide.color;
+  ctx.globalAlpha=guide.opacity;ctx.lineWidth=1/zoom;
+  guide.points.forEach(v=>{
+    const extent=Math.hypot(W,H)*1.5+Math.hypot(v.x-W/2,v.y-H/2);
+    ctx.beginPath();
+    for(let i=0;i<guide.rays;i++){
+      const a=i*Math.PI*2/guide.rays;
+      ctx.moveTo(v.x,v.y);ctx.lineTo(v.x+Math.cos(a)*extent,v.y+Math.sin(a)*extent);
+    }
+    ctx.stroke();
+  });
+  if(perspectiveEditMode){
+    ctx.globalAlpha=.95;
+    guide.points.forEach((v,i)=>{
+      const selected=v.id===perspectiveSelectedId,r=(selected?8:6)/zoom;
+      ctx.beginPath();ctx.arc(v.x,v.y,r,0,Math.PI*2);ctx.fill();
+      ctx.strokeStyle=selected?'#ffffff':'#181818';ctx.lineWidth=(selected?2.5:1.5)/zoom;ctx.stroke();
+      ctx.font=`${11/zoom}px system-ui,sans-serif`;ctx.textAlign='left';ctx.textBaseline='bottom';
+      ctx.fillStyle=selected?'#ffffff':guide.color;ctx.fillText('VP'+(i+1),v.x+10/zoom,v.y-8/zoom);
+      ctx.fillStyle=guide.color;
+    });
+  }
+  ctx.restore();
+}
+
 function requestRedraw(){
     drawCanvasPaper(displayCtx);
     layers.forEach(l=>{
@@ -1174,6 +1268,7 @@ function requestRedraw(){
     }
 
     drawCanvasGrid(displayCtx);
+    drawPerspectiveGuide(displayCtx);
 
     // Draw selection marching ants
     if(selection){
@@ -1199,11 +1294,38 @@ function requestRedraw(){
     if(textSession)drawTextPreview(displayCtx,textSession);
 
     container.style.transform=`translate(${panX}px,${panY}px) scale(${zoom})`;
-    const modeText=transformSession?` | ${transformSession.mode.toUpperCase()}`:(textSession?' | TEXT':(straightStroke?' | STRAIGHT':''));
+    const modeText=perspectiveEditMode?' | PERSPECTIVE':(transformSession?` | ${transformSession.mode.toUpperCase()}`:(textSession?' | TEXT':(straightStroke?' | STRAIGHT':'')));
     statusBar.textContent=`${Math.round(zoom*100)}% | ${W}×${H}${modeText}`;
 }
 
 function updateDisplay(){requestRedraw();}
+
+function setPerspectiveEditMode(on){
+  perspectiveEditMode=!!on;perspectiveDrag=null;
+  if(!perspectiveEditMode)perspectiveSelectedId=null;
+  document.getElementById('btn-perspective').classList.toggle('active',perspectiveEditMode);
+  wrap.style.cursor=perspectiveEditMode?'crosshair':cursorForTool();
+  requestRedraw();
+}
+function togglePerspectiveEditing(){
+  if(transformSession||textSession){statusBar.textContent='Apply or cancel the current transform or text session before editing perspective.';return;}
+  const guide=canvasSettings.perspective;
+  if(!perspectiveEditMode){
+    let changed=false;
+    if(!guide.enabled){guide.enabled=true;changed=true;}
+    if(!guide.points.length){const preset=guide.preset==='custom'?'one':guide.preset;guide.points=makePerspectivePoints(preset);guide.preset=preset;changed=true;}
+    if(changed)saveHistory();
+  }
+  setPerspectiveEditMode(!perspectiveEditMode);
+}
+function startPerspectiveInteraction(p){
+  const guide=canvasSettings.perspective,threshold=14/zoom;
+  let hit=null,best=Infinity;
+  guide.points.forEach(v=>{const d=Math.hypot(p.x-v.x,p.y-v.y);if(d<threshold&&d<best){hit=v;best=d;}});
+  if(!hit){hit=createVanishingPoint(p.x,p.y);guide.points.push(hit);guide.preset='custom';perspectiveDrag={id:hit.id,isNew:true,moved:false};}
+  else perspectiveDrag={id:hit.id,isNew:false,moved:false};
+  perspectiveSelectedId=hit.id;requestRedraw();
+}
 
 // ============================================================
 // POINTER EVENTS (stylus + touch + mouse)
@@ -1231,6 +1353,8 @@ function wireEvents(){
       requestRedraw();
       return;
     }
+
+    if(perspectiveEditMode){startPerspectiveInteraction(p);return;}
 
     if(activeTool==='text'){
       if(textSession){
@@ -1274,6 +1398,12 @@ function wireEvents(){
       return;
     }
 
+    if(perspectiveDrag){
+      const v=canvasSettings.perspective.points.find(v=>v.id===perspectiveDrag.id);
+      if(v){v.x=p.x;v.y=p.y;canvasSettings.perspective.preset='custom';perspectiveDrag.moved=true;}
+      requestRedraw();return;
+    }
+
     if(textDrag&&textSession){
       textSession.x=p.x-textDrag.offsetX;
       textSession.y=p.y-textDrag.offsetY;
@@ -1310,6 +1440,7 @@ function wireEvents(){
   const endStroke=()=>{
     if(isPanning){isPanning=false;lastPoint=null;requestRedraw();return;}
     if(transformDrag){transformDrag=null;requestRedraw();return;}
+    if(perspectiveDrag){const save=perspectiveDrag.isNew||perspectiveDrag.moved;perspectiveDrag=null;if(save)saveHistory();requestRedraw();return;}
     if(textDrag){textDrag=null;requestRedraw();return;}
     if(isSelecting){
       isSelecting=false;
@@ -1334,6 +1465,7 @@ function wireEvents(){
       if(document.getElementById('canvas-dialog').style.display!=='none'){e.preventDefault();document.getElementById('canvas-dialog').style.display='none';return;}
       if(document.getElementById('shortcuts-dialog').style.display!=='none'){e.preventDefault();toggleShortcuts(false);return;}
       document.getElementById('transform-dropdown').classList.remove('open');
+      if(perspectiveEditMode){e.preventDefault();setPerspectiveEditMode(false);return;}
       if(pickingColor){e.preventDefault();pickingColor=false;activeTool=pickReturnTool||'brush';pickReturnTool=null;wrap.style.cursor=cursorForTool();updateToolButtons();requestRedraw();return;}
       if(transformSession){e.preventDefault();cancelTransform();return;}
       if(textSession){e.preventDefault();cancelTextSession();return;}
@@ -1363,7 +1495,11 @@ function wireEvents(){
     if(e.code==='Space'){e.preventDefault();spaceDown=true;wrap.style.cursor='grab';return;}
     if(key==='f'){e.preventDefault();toggleFullScreen();return;}
     if(e.key==='?'){e.preventDefault();toggleShortcuts();return;}
-    if(e.key==='Delete'||e.key==='Backspace'){if(selection){e.preventDefault();deleteSelectionPixels();}return;}
+    if(e.key==='Delete'||e.key==='Backspace'){
+      if(perspectiveEditMode&&perspectiveSelectedId){e.preventDefault();canvasSettings.perspective.points=canvasSettings.perspective.points.filter(v=>v.id!==perspectiveSelectedId);canvasSettings.perspective.preset='custom';perspectiveSelectedId=null;saveHistory();requestRedraw();return;}
+      if(selection){e.preventDefault();deleteSelectionPixels();}return;
+    }
+    if(key==='p'){e.preventDefault();togglePerspectiveEditing();return;}
     if(key==='b'){document.getElementById('tool-brush').click();return;}
     if(key==='e'){document.getElementById('tool-eraser').click();return;}
     if(key==='v'){document.getElementById('tool-move').click();return;}
@@ -2280,6 +2416,7 @@ function boxBlur(imageData,radius){const w=imageData.width,h=imageData.height,da
 // ============================================================
 function wireToolbar(){
   const leaveTransientMode=()=>{
+    if(perspectiveEditMode)setPerspectiveEditMode(false);
     if(transformSession)cancelTransform();
     if(textSession)commitTextSession();
     if(selection&&!selection.floating){selection=null;requestRedraw();}
@@ -2306,6 +2443,7 @@ function wireToolbar(){
   document.getElementById('tool-move').onclick=()=>{leaveTransientMode();activeTool='move';wrap.style.cursor='move';updateToolButtons();};
   document.getElementById('tool-text').onclick=()=>{leaveTransientMode();activeTool='text';wrap.style.cursor='text';updateToolButtons();requestRedraw();};
   document.getElementById('tool-smudge').onclick=()=>{
+    if(perspectiveEditMode)setPerspectiveEditMode(false);
     smudgeMode=!smudgeMode;
     if(smudgeMode)captureSmudgeBrush();else smudgeBrushSettings=null;
     document.getElementById('tool-smudge').classList.toggle('active',smudgeMode);
@@ -2316,6 +2454,7 @@ function wireToolbar(){
   document.getElementById('btn-zoom-out').onclick=()=>{zoom=Math.max(0.1,zoom*0.9);updateDisplay();};
   document.getElementById('btn-zoom-in').onclick=()=>{zoom=Math.min(5,zoom*1.1);updateDisplay();};
   document.getElementById('btn-reset-view').onclick=fitCanvasToView;
+  document.getElementById('btn-perspective').onclick=togglePerspectiveEditing;
   document.getElementById('btn-canvas-size').onclick=()=>{
     if(transformSession)cancelTransform();
     if(textSession)commitTextSession();
@@ -2843,6 +2982,22 @@ function wireImageDragAndDrop(){
 // CANVAS / PAPER / GRID DIALOG
 // ============================================================
 const CANVAS_PRESETS={a4p:[2480,3508],a4l:[3508,2480],square:[2400,2400],hd:[1920,1080],uhd:[3840,2160],story:[1080,1920]};
+function perspectiveDialogDimensions(){return[clamp(parseInt(document.getElementById('new-width').value)||W,1,10000),clamp(parseInt(document.getElementById('new-height').value)||H,1,10000)];}
+function markPerspectiveDraftCustom(){perspectiveDraft.preset='custom';document.getElementById('perspective-preset').value='custom';}
+function renderPerspectivePointList(){
+  const list=document.getElementById('perspective-point-list');list.innerHTML='';
+  if(!perspectiveDraft.points.length){list.innerHTML='<p class="help-text">No vanishing points. Choose a preset or add a point.</p>';return;}
+  perspectiveDraft.points.forEach((v,i)=>{
+    const row=document.createElement('div');row.className='perspective-point-row';
+    const label=document.createElement('span');label.textContent='VP'+(i+1);row.appendChild(label);
+    ['x','y'].forEach(axis=>{
+      const input=document.createElement('input');input.type='number';input.step='1';input.value=Math.round(v[axis]*100)/100;input.setAttribute('aria-label','VP'+(i+1)+' '+axis.toUpperCase());
+      input.oninput=()=>{v[axis]=Number.isFinite(input.valueAsNumber)?input.valueAsNumber:0;markPerspectiveDraftCustom();};row.appendChild(input);
+    });
+    const remove=document.createElement('button');remove.type='button';remove.textContent='×';remove.title='Remove VP'+(i+1);remove.setAttribute('aria-label','Remove vanishing point '+(i+1));
+    remove.onclick=()=>{perspectiveDraft.points.splice(i,1);markPerspectiveDraftCustom();renderPerspectivePointList();};row.appendChild(remove);list.appendChild(row);
+  });
+}
 function syncCanvasDialog(){
   document.getElementById('canvas-preset').value='custom';
   document.getElementById('new-width').value=W;document.getElementById('new-height').value=H;
@@ -2851,15 +3006,31 @@ function syncCanvasDialog(){
   document.getElementById('grid-type').value=canvasSettings.grid;document.getElementById('grid-size').value=canvasSettings.gridSize;document.getElementById('grid-size-val').textContent=canvasSettings.gridSize+' px';
   document.getElementById('grid-opacity').value=Math.round(canvasSettings.gridOpacity*100);document.getElementById('grid-opacity-val').textContent=Math.round(canvasSettings.gridOpacity*100)+'%';
   document.getElementById('grid-color').value=canvasSettings.gridColor;
+  perspectiveDraft=clonePerspective(canvasSettings.perspective);perspectiveDraft.dialogW=W;perspectiveDraft.dialogH=H;
+  document.getElementById('perspective-enabled').checked=perspectiveDraft.enabled;
+  document.getElementById('perspective-preset').value=perspectiveDraft.preset;
+  document.getElementById('perspective-rays').value=perspectiveDraft.rays;document.getElementById('perspective-rays-val').textContent=perspectiveDraft.rays;
+  document.getElementById('perspective-opacity').value=Math.round(perspectiveDraft.opacity*100);document.getElementById('perspective-opacity-val').textContent=Math.round(perspectiveDraft.opacity*100)+'%';
+  document.getElementById('perspective-color').value=perspectiveDraft.color;renderPerspectivePointList();
   document.getElementById('new-bg').disabled=canvasSettings.surface==='transparent';document.getElementById('new-bg-text').disabled=canvasSettings.surface==='transparent';
 }
 
 function wireCanvasDialog(){
   document.getElementById('canvas-preset').onchange=e=>{const p=CANVAS_PRESETS[e.target.value];if(p){document.getElementById('new-width').value=p[0];document.getElementById('new-height').value=p[1];}};
-  ['new-width','new-height'].forEach(id=>document.getElementById(id).oninput=()=>{document.getElementById('canvas-preset').value='custom';});
+  ['new-width','new-height'].forEach(id=>document.getElementById(id).oninput=()=>{
+    document.getElementById('canvas-preset').value='custom';
+    if(!perspectiveDraft)return;
+    const[w,h]=perspectiveDialogDimensions(),oldW=perspectiveDraft.dialogW||W,oldH=perspectiveDraft.dialogH||H;
+    if(w!==oldW||h!==oldH){perspectiveDraft.points.forEach(v=>{v.x*=w/oldW;v.y*=h/oldH;});perspectiveDraft.dialogW=w;perspectiveDraft.dialogH=h;renderPerspectivePointList();}
+  });
   document.getElementById('canvas-surface').onchange=e=>{const transparent=e.target.value==='transparent';document.getElementById('new-bg').disabled=transparent;document.getElementById('new-bg-text').disabled=transparent;};
   document.getElementById('grid-size').oninput=e=>{document.getElementById('grid-size-val').textContent=e.target.value+' px';};
   document.getElementById('grid-opacity').oninput=e=>{document.getElementById('grid-opacity-val').textContent=e.target.value+'%';};
+  document.getElementById('perspective-rays').oninput=e=>{perspectiveDraft.rays=parseInt(e.target.value);document.getElementById('perspective-rays-val').textContent=e.target.value;};
+  document.getElementById('perspective-opacity').oninput=e=>{perspectiveDraft.opacity=parseInt(e.target.value)/100;document.getElementById('perspective-opacity-val').textContent=e.target.value+'%';};
+  document.getElementById('perspective-color').oninput=e=>{perspectiveDraft.color=e.target.value;};
+  document.getElementById('perspective-preset').onchange=e=>{perspectiveDraft.preset=e.target.value;if(e.target.value!=='custom'){const[w,h]=perspectiveDialogDimensions();perspectiveDraft.points=makePerspectivePoints(e.target.value,w,h);}renderPerspectivePointList();};
+  document.getElementById('btn-add-vanishing-point').onclick=()=>{const[w,h]=perspectiveDialogDimensions(),i=perspectiveDraft.points.length;perspectiveDraft.points.push(createVanishingPoint(w*(.5+((i%3)-1)*.08),h*(.5+(Math.floor(i/3)%3)*.08)));markPerspectiveDraftCustom();renderPerspectivePointList();};
   document.getElementById('btn-cancel-canvas').onclick=()=>{document.getElementById('canvas-dialog').style.display='none';};
   document.getElementById('btn-apply-canvas').onclick=applyCanvasSize;
   document.getElementById('canvas-dialog').addEventListener('pointerdown',e=>{if(e.target.id==='canvas-dialog')e.currentTarget.style.display='none';});
@@ -2870,8 +3041,14 @@ function wireCanvasDialog(){
 function applyCanvasSize(){
   const nw=clamp(parseInt(document.getElementById('new-width').value)||W,1,10000),nh=clamp(parseInt(document.getElementById('new-height').value)||H,1,10000);
   const dimensionsChanged=nw!==W||nh!==H;
+  const perspective=clonePerspective(perspectiveDraft);
+  perspective.enabled=document.getElementById('perspective-enabled').checked;
+  perspective.rays=parseInt(document.getElementById('perspective-rays').value);
+  perspective.opacity=parseInt(document.getElementById('perspective-opacity').value)/100;
+  perspective.color=document.getElementById('perspective-color').value;
+  perspective.preset=document.getElementById('perspective-preset').value;
   W=nw;H=nh;BG=document.getElementById('new-bg').value;
-  canvasSettings={surface:document.getElementById('canvas-surface').value,texture:document.getElementById('canvas-texture').value,grid:document.getElementById('grid-type').value,gridSize:parseInt(document.getElementById('grid-size').value),gridOpacity:parseInt(document.getElementById('grid-opacity').value)/100,gridColor:document.getElementById('grid-color').value};
+  canvasSettings={surface:document.getElementById('canvas-surface').value,texture:document.getElementById('canvas-texture').value,grid:document.getElementById('grid-type').value,gridSize:parseInt(document.getElementById('grid-size').value),gridOpacity:parseInt(document.getElementById('grid-opacity').value)/100,gridColor:document.getElementById('grid-color').value,perspective};
   if(dimensionsChanged)resizeCanvases(W,H);
   paperTextureCache.key='';document.getElementById('canvas-dialog').style.display='none';
   updateDisplay();saveHistory();
